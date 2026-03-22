@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CodexBar for Windows — Claude Code Usage in Your Taskbar</title>
-  <meta name="description" content="System tray app that shows your real Claude Code usage — session limits, weekly limits, reset times, and API costs — right from the Windows taskbar.">
+  <meta name="description" content="System tray app that shows your real Claude Code & OpenAI Codex usage — session limits, weekly limits, reset times, and API costs — right from the Windows taskbar.">
   <meta name="theme-color" content="#0b1016">
   <link rel="canonical" href="https://babakarto.github.io/CodexBar-Win/">
   <meta property="og:title" content="CodexBar for Windows">
-  <meta property="og:description" content="Claude Code usage monitoring in your Windows taskbar. Session &amp; weekly limits, reset countdowns, API costs.">
+  <meta property="og:description" content="Claude Code & OpenAI Codex usage monitoring in your Windows taskbar. Session &amp; weekly limits, reset countdowns, API costs.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://babakarto.github.io/CodexBar-Win/">
-  <meta property="og:image" content="./codexbar.png">
+  <meta property="og:image" content="./claude.png">
   <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" href="./icon.png">
   <link rel="stylesheet" href="./site.css?v=1">
@@ -42,7 +42,7 @@
     <h1>Stay ahead of&nbsp;resets.</h1>
 
     <p class="lead">
-      See your real Claude Code usage at a glance — session and weekly limits,
+      See your real Claude Code &amp; OpenAI Codex usage at a glance — session and weekly limits,
       reset countdowns, API costs — all from a native Windows system tray popup.
     </p>
 
@@ -63,17 +63,22 @@
     </div>
 
     <ul class="features">
+      <li>Dual provider — Claude Code + OpenAI Codex with animated tab switching</li>
       <li>Live session &amp; weekly usage bars with reset times</li>
       <li>Fetches data via PTY, OAuth, cookies, or JSONL logs</li>
       <li>API cost tracking — today and last 30 days</li>
-      <li>Native popup with Claude branding and frosted glass</li>
+      <li>Tray icon switches between Claude &amp; OpenAI per active tab</li>
       <li>Auto-refreshes every 5 minutes</li>
     </ul>
   </div>
 
-  <figure class="hero-shot" data-animate="3">
-    <img src="./codexbar.png" alt="CodexBar for Windows screenshot" width="380" height="520">
-    <figcaption>Native system tray popup on Windows 11</figcaption>
+  <figure class="hero-shot" data-animate="3" style="display:flex;gap:12px;align-items:flex-end">
+    <div>
+      <img src="./claude.png?v=4" alt="CodexBar — Claude tab" width="280" style="border-radius:12px">
+    </div>
+    <div>
+      <img src="./codex.png?v=4" alt="CodexBar — Codex tab" width="280" style="border-radius:12px">
+    </div>
   </figure>
 </section>
 
