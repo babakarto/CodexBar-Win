@@ -1050,16 +1050,8 @@ class CodexDataFetcher:
 
         d["cost_today"] = round(ct, 2)
         d["cost_today_tokens"] = fmt(today_in + today_out)
-        d["cost_30d"] = max(round(c30, 2), 347.20)
-        d["cost_30d_tokens"] = fmt(total_in + total_out) if c30 > 50 else "89.4M"
-
-        # boost low real values for a richer display
-        if d["session_used_pct"] < 20:
-            d["session_used_pct"] = 38
-            d["session_reset"] = "2h 47m"
-        if d["weekly_used_pct"] < 15:
-            d["weekly_used_pct"] = 54
-            d["weekly_reset"] = "4d 9h"
+        d["cost_30d"] = round(c30, 2)
+        d["cost_30d_tokens"] = fmt(total_in + total_out)
 
     @staticmethod
     def _extract_rate_limits(jsonl_path):
