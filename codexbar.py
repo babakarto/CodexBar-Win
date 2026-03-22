@@ -30,20 +30,20 @@ from urllib.error import URLError, HTTPError
 try:
     from PIL import Image, ImageDraw
 except ImportError:
-    print("ERRORE: Pillow mancante. Lancia: python -m pip install Pillow")
+    print("ERROR: Pillow not found. Run: python -m pip install Pillow")
     sys.exit(1)
 
 try:
     import pystray
     from pystray import MenuItem, Menu
 except ImportError:
-    print("ERRORE: pystray mancante. Lancia: python -m pip install pystray")
+    print("ERROR: pystray not found. Run: python -m pip install pystray")
     sys.exit(1)
 
 try:
     import customtkinter as ctk
 except ImportError:
-    print("ERRORE: customtkinter mancante. Lancia: python -m pip install customtkinter")
+    print("ERROR: customtkinter not found. Run: python -m pip install customtkinter")
     sys.exit(1)
 
 try:
@@ -800,7 +800,7 @@ class ClaudeDataFetcher:
                             line = line.strip()
                             if not line or len(line) < 10: continue
                             try: entry = json.loads(line)
-                            except: continue
+                            except Exception: continue
                             if entry.get("type") != "assistant": continue
                             usage = entry.get("message",{}).get("usage",{})
                             if not usage: continue
@@ -819,8 +819,8 @@ class ClaudeDataFetcher:
                                 try:
                                     if datetime.fromisoformat(ts.replace("Z","+00:00")).date() == today:
                                         today_in += inp; today_out += out
-                                except: pass
-                except: continue
+                                except Exception: pass
+                except Exception: continue
 
         print(f"    Scanned {nfiles} files, {len(seen)} messages")
         if total_in + total_out == 0: return None
