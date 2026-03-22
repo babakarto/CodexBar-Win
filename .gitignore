@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+dist/
+build/
+*.spec
+*.egg-info/
+.env
+venv/
+.venv/
+_pty_*.txt
+pty_debug.txt
