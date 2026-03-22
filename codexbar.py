@@ -1200,8 +1200,8 @@ class CodexBarPopup(ctk.CTkToplevel):
         tab_h = self._tab_bar.winfo_reqheight()
         foot_h = self._footer_frame.winfo_reqheight()
         h = tab_h + self._fixed_panel_h + foot_h
-        self._target_x = work[0] - w - 12
-        self._target_y = work[1] - h - 12
+        self._target_x = max(work[2] + 8, work[0] - w - 12)
+        self._target_y = max(work[3] + 8, work[1] - h - 12)
         self.geometry(f"{w}x{h}+{self._target_x}+{self._target_y + 14}")
 
         self.after(30, self._apply_dwm)
@@ -1212,15 +1212,23 @@ class CodexBarPopup(ctk.CTkToplevel):
 
     # ── DWM ──
 
-    @staticmethod
-    def _work_area():
+    def _work_area(self):
+        """Return (right, bottom, left, top) of the usable screen area
+        in logical pixels (what customtkinter geometry() expects).
+
+        customtkinter sets Per-Monitor DPI awareness, so Win32 APIs
+        return physical pixels.  Divide by the CTk scaling factor
+        to convert to the logical coordinate space that geometry() uses.
+        """
         try:
             from ctypes import wintypes
             rect = wintypes.RECT()
             ctypes.windll.user32.SystemParametersInfoW(48, 0, ctypes.byref(rect), 0)
-            return (rect.right, rect.bottom)
+            scale = self._get_window_scaling()
+            return (int(rect.right / scale), int(rect.bottom / scale),
+                    int(rect.left / scale), int(rect.top / scale))
         except Exception:
-            return (1920, 1080)
+            return (self.winfo_screenwidth(), self.winfo_screenheight(), 0, 0)
 
     def _apply_dwm(self):
         try:
@@ -1327,7 +1335,8 @@ class CodexBarPopup(ctk.CTkToplevel):
         foot_h = self._footer_frame.winfo_reqheight()
         h = tab_h + self._fixed_panel_h + foot_h
         work = self._work_area()
-        self._target_y = work[1] - h - 12
+        self._target_x = max(work[2] + 8, work[0] - self.WIDTH - 12)
+        self._target_y = max(work[3] + 8, work[1] - h - 12)
         self.geometry(f"{self.WIDTH}x{h}+{self._target_x}+{self._target_y}")
 
     def _morph_tick(self):
