@@ -1,6 +1,6 @@
 # CodexBar for Windows
 
-System tray app that shows your **real Claude Code usage** — session limits, weekly limits, reset times, and API costs — right from the taskbar.
+> System tray app that shows your **real Claude Code usage** — session limits, weekly limits, reset times, and API costs — right from the Windows taskbar.
 
 Windows port of [steipete/CodexBar](https://github.com/steipete/CodexBar) for macOS.
 
@@ -8,62 +8,92 @@ Windows port of [steipete/CodexBar](https://github.com/steipete/CodexBar) for ma
 ![Windows 10/11](https://img.shields.io/badge/platform-Windows%2010%2F11-lightgrey)
 ![License MIT](https://img.shields.io/badge/license-MIT-green)
 
-## Features
+<p align="center">
+  <img src="docs/codexbar.png" alt="CodexBar for Windows" width="380">
+</p>
 
-- **System tray icon** with the Claude logo
-- **Native popup** — borderless customtkinter window with rounded corners, slide-up animation, and frosted glass transparency
-- **Live usage data** from Claude Code CLI via PTY (same method as the macOS version)
-- **Fallback chain**: CLI (PTY) &rarr; OAuth token &rarr; Browser cookies &rarr; JSONL logs
-- **Session & weekly usage bars** with percentage and reset countdowns
-- **Cost tracking** — scans local JSONL logs for today and 30-day spend
-- **Auto-refresh** every 5 minutes
+## Download
 
-## Quick Start
+### Standalone .exe (no Python needed)
 
-```
-git clone https://github.com/AlessandroAlessandrini/CodexBar-Win.git
+1. Go to [**Releases**](https://github.com/babakarto/CodexBar-Win/releases/latest)
+2. Download `CodexBar.exe` or `CodexBar-Win.zip`
+3. Run `CodexBar.exe` — it appears in your system tray
+
+### Run from source
+
+```bash
+git clone https://github.com/babakarto/CodexBar-Win.git
 cd CodexBar-Win
 pip install -r requirements.txt
 python codexbar.py
 ```
 
-Or double-click `CodexBar.bat`.
+Or double-click `CodexBar.bat` — it installs dependencies and launches.
 
 ## Requirements
 
-- **Python 3.10+**
-- **Windows 10/11**
+- **Windows 10 or 11**
 - **Claude Code CLI** installed and logged in (`claude` in PATH)
+- Python 3.10+ (only if running from source)
 
-Dependencies (auto-installed):
-```
-pystray>=0.19.5
-Pillow>=10.0
-customtkinter>=5.2
-pywinpty>=2.0
-```
+## Features
+
+- **Live usage bars** — session and weekly limits with color-coded percentages
+- **Reset countdowns** — know exactly when your limits refresh
+- **Cost tracking** — today's spend and 30-day totals from local logs
+- **Native popup** — customtkinter window with rounded corners, slide-up animation, frosted glass
+- **Claude branding** — orange palette, starburst logo, plan badge
+- **Auto-refresh** — updates every 5 minutes
+- **Zero config** — reads everything Claude Code already stores locally
 
 ## How It Gets Data
 
 CodexBar tries multiple methods in order, using the first that succeeds:
 
-| Method | What it does |
-|--------|-------------|
-| **CLI (PTY)** | Spawns an interactive `claude` session via pseudo-terminal, sends `/usage`, parses the output. This is the primary and most reliable method. |
-| **OAuth token** | Reads `~/.claude/.credentials.json`, calls the Claude.ai API with the stored access token. |
-| **Browser cookies** | Reads `sessionKey` from Chrome/Edge/Brave cookie databases, decrypts with DPAPI + AES-GCM, calls the Claude.ai API. |
-| **JSONL logs** | Scans `~/.claude/projects/` for conversation logs, calculates token costs. Always runs for cost data regardless of which method provides usage. |
+| Priority | Method | What it does |
+|----------|--------|-------------|
+| 1 | **CLI (PTY)** | Spawns interactive `claude` via pseudo-terminal, sends `/usage`, parses output |
+| 2 | **OAuth token** | Reads `~/.claude/.credentials.json`, calls Claude.ai API |
+| 3 | **Browser cookies** | Reads `sessionKey` from Chrome/Edge/Brave, decrypts with DPAPI + AES-GCM |
+| 4 | **JSONL logs** | Scans `~/.claude/projects/` for conversation logs (always runs for cost data) |
+
+## macOS vs Windows
+
+| | [CodexBar](https://github.com/steipete/CodexBar) (macOS) | CodexBar-Win (Windows) |
+|---|---|---|
+| **UI** | SwiftUI menu bar popup | customtkinter system tray popup |
+| **Language** | Swift | Python |
+| **Providers** | 16+ (Claude, Cursor, Copilot, Gemini...) | Claude Code |
+| **Data source** | CLI PTY | CLI PTY → OAuth → Cookies → JSONL |
+| **Install** | `brew install --cask steipete/tap/codexbar` | Download .exe or `pip install` |
+| **Auto-update** | Sparkle framework | GitHub Releases |
+| **Cookie decrypt** | macOS Keychain | Windows DPAPI + AES-GCM via ctypes |
+| **Size** | ~5 MB (native) | ~30 MB (bundled Python runtime) |
+| **License** | MIT | MIT |
 
 ## Build Standalone .exe
 
 ```powershell
 .\build.ps1
-# Output: dist/CodexBar.exe
+# Output: dist/CodexBar.exe (~30 MB)
 ```
+
+Requires PyInstaller (`pip install pyinstaller`). The script handles icon generation and all hidden imports.
+
+## Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| No usage data shown | Make sure `claude` is in PATH and you're logged in |
+| "winpty not found" | `pip install pywinpty` |
+| Antivirus flags .exe | PyInstaller executables are commonly false-positived. Add an exception or run from source |
+| Popup doesn't appear | Check the system tray overflow area (click ^ arrow near clock) |
+| CLI shows 0% | Another Claude Code session may be running — CodexBar spawns its own PTY |
 
 ## Credits
 
-Inspired by [steipete/CodexBar](https://github.com/steipete/CodexBar) (MIT) — the original macOS menu bar app.
+Windows port inspired by [steipete/CodexBar](https://github.com/steipete/CodexBar) (MIT) by [Peter Steinberger](https://steipete.me) — the original macOS menu bar app.
 
 ## License
 

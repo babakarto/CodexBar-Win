@@ -1,0 +1,81 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Generate multi-resolution icon
+        run: |
+          python -c "
+          from PIL import Image
+          img = Image.open('assets/claude-logo.png').convert('RGBA')
+          img.save('assets/codexbar.ico', format='ICO',
+                   sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])
+          print('Icon generated')
+          "
+
+      - name: Build executable
+        run: |
+          pyinstaller --onefile `
+            --noconsole `
+            --name "CodexBar" `
+            --icon "assets/codexbar.ico" `
+            --add-data "assets;assets" `
+            --hidden-import pystray._win32 `
+            --hidden-import customtkinter `
+            --collect-data customtkinter `
+            --hidden-import winpty `
+            --collect-binaries pywinpty `
+            codexbar.py
+        shell: pwsh
+
+      - name: Verify build
+        run: |
+          if (!(Test-Path "dist/CodexBar.exe")) {
+            Write-Error "Build failed - CodexBar.exe not found"
+            exit 1
+          }
+          $size = [math]::Round((Get-Item "dist/CodexBar.exe").Length / 1MB, 1)
+          Write-Host "CodexBar.exe size: $size MB"
+        shell: pwsh
+
+      - name: Create ZIP
+        run: Compress-Archive -Path "dist/CodexBar.exe" -DestinationPath "dist/CodexBar-Win.zip"
+        shell: pwsh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodexBar-Win
+          path: dist/CodexBar.exe
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/CodexBar-Win.zip
+            dist/CodexBar.exe
+          generate_release_notes: true

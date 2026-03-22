@@ -53,6 +53,15 @@ except ImportError:
     print("[CodexBar] winpty not found (pip install pywinpty). CLI /usage disabled.")
 
 
+def _resource_path(relative_path):
+    """Get absolute path to resource — works for dev and PyInstaller .exe."""
+    if getattr(sys, 'frozen', False):
+        base = Path(sys._MEIPASS)
+    else:
+        base = Path(__file__).parent
+    return base / relative_path
+
+
 # ─────────────────────────────────────────────
 # Chromium cookie decryptor  (DPAPI + AES-GCM)
 # ─────────────────────────────────────────────
@@ -823,7 +832,7 @@ class ClaudeDataFetcher:
 
 def _load_logo(size=28):
     """Load and resize the Claude starburst logo from assets/."""
-    logo_path = Path(__file__).parent / "assets" / "claude-logo.png"
+    logo_path = _resource_path("assets") / "claude-logo.png"
     if not logo_path.exists():
         return None
     try:
