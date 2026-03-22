@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CodexBar for Windows — Claude Code Usage in Your Taskbar</title>
+  <meta name="description" content="System tray app that shows your real Claude Code usage — session limits, weekly limits, reset times, and API costs — right from the Windows taskbar.">
+  <meta name="theme-color" content="#0b1016">
+  <link rel="canonical" href="https://babakarto.github.io/CodexBar-Win/">
+  <meta property="og:title" content="CodexBar for Windows">
+  <meta property="og:description" content="Claude Code usage monitoring in your Windows taskbar. Session &amp; weekly limits, reset countdowns, API costs.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://babakarto.github.io/CodexBar-Win/">
+  <meta property="og:image" content="./codexbar.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="./icon.png">
+  <link rel="stylesheet" href="./site.css?v=1">
+</head>
+<body>
+
+<!-- ── Header ── -->
+<header class="top wrap" data-animate="1">
+  <a class="brand" href="./">
+    <span class="title">CodexBar <span style="opacity:.5">Win</span></span>
+    <small>Claude Code usage monitor</small>
+  </a>
+  <nav class="nav">
+    <a class="btn btn-primary" href="https://github.com/babakarto/CodexBar-Win/releases/latest">Download</a>
+    <a class="btn btn-ghost" href="https://github.com/babakarto/CodexBar-Win">Source</a>
+  </nav>
+</header>
+
+<!-- ── Hero ── -->
+<section class="hero wrap">
+  <div class="hero-body" data-animate="2">
+    <div class="badges">
+      <span class="badge"><span class="dot"></span> Free &amp; open source</span>
+      <span class="badge">Windows 10/11</span>
+      <span class="badge">Claude Code</span>
+    </div>
+
+    <h1>Stay ahead of&nbsp;resets.</h1>
+
+    <p class="lead">
+      See your real Claude Code usage at a glance — session and weekly limits,
+      reset countdowns, API costs — all from a native Windows system tray popup.
+    </p>
+
+    <p class="reqs">
+      <span>Python 3.10+</span>
+      <span>Windows 10 / 11</span>
+    </p>
+
+    <div class="cta">
+      <a class="btn btn-primary" href="https://github.com/babakarto/CodexBar-Win/releases/latest">Download</a>
+      <a class="btn btn-ghost" href="https://github.com/babakarto/CodexBar-Win">View source</a>
+    </div>
+
+    <div class="install-cmd">
+      <span>$</span>
+      <code>pip install pystray Pillow customtkinter pywinpty</code>
+      <button class="copy-btn" onclick="copyInstall(this)">Copy</button>
+    </div>
+
+    <ul class="features">
+      <li>Live session &amp; weekly usage bars with reset times</li>
+      <li>Fetches data via PTY, OAuth, cookies, or JSONL logs</li>
+      <li>API cost tracking — today and last 30 days</li>
+      <li>Native popup with Claude branding and frosted glass</li>
+      <li>Auto-refreshes every 5 minutes</li>
+    </ul>
+  </div>
+
+  <figure class="hero-shot" data-animate="3">
+    <img src="./codexbar.png" alt="CodexBar for Windows screenshot" width="380" height="520">
+    <figcaption>Native system tray popup on Windows 11</figcaption>
+  </figure>
+</section>
+
+<!-- ── Details 1 ── -->
+<section class="details wrap" data-animate="4">
+  <article class="card">
+    <h2>Install in seconds</h2>
+    <p>Clone the repo, <code>pip install -r requirements.txt</code>, run <code>python codexbar.py</code>.
+    Or double-click <code>CodexBar.bat</code> — it handles everything. Build a standalone
+    <code>.exe</code> with the included PyInstaller script.</p>
+  </article>
+  <article class="card">
+    <h2>Claude Code native</h2>
+    <p>Built specifically for Claude Code on Windows. Spawns an interactive PTY session,
+    sends <code>/usage</code>, and parses the real output — the same method the macOS version uses.
+    Falls back to OAuth token or browser cookies automatically.</p>
+  </article>
+  <article class="card">
+    <h2>Privacy first</h2>
+    <p>Everything runs locally on your machine. No telemetry, no external servers,
+    no data collection. Your credentials never leave your computer.
+    Reads only what Claude Code already stores locally.</p>
+  </article>
+</section>
+
+<!-- ── Details 2 ── -->
+<section class="details wrap" data-animate="5">
+  <article class="card">
+    <h2>Usage tracking</h2>
+    <p>Session and weekly usage bars with live percentages. Color-coded from
+    orange (low) to amber (medium) to red (high). Reset countdowns so you
+    know exactly when your limits refresh.</p>
+  </article>
+  <article class="card">
+    <h2>Cost monitoring</h2>
+    <p>Scans your local Claude Code JSONL logs to calculate real API costs.
+    Shows today's spend and 30-day totals with token counts.
+    All computed locally from your conversation logs.</p>
+  </article>
+  <article class="card">
+    <h2>Smart fallback chain</h2>
+    <p>Tries CLI via PTY first (most accurate), then OAuth token from
+    <code>~/.claude/.credentials.json</code>, then browser cookies with
+    DPAPI decryption, then JSONL logs. Always gets your data.</p>
+  </article>
+</section>
+
+<!-- ── Requirements ── -->
+<section class="details full wrap" data-animate="6">
+  <article class="card">
+    <h2>Requirements</h2>
+    <p>Python 3.10 or later. Windows 10 or 11. Claude Code CLI installed and logged in
+    (<code>claude</code> in your PATH). That's it — no admin rights needed, no browser extensions,
+    no API keys to configure.</p>
+  </article>
+</section>
+
+<!-- ── Links ── -->
+<section class="links-row wrap" data-animate="7">
+  <a class="pill" href="https://github.com/babakarto/CodexBar-Win#readme">Docs</a>
+  <a class="pill" href="https://github.com/babakarto/CodexBar-Win#how-it-gets-data">Data sources</a>
+  <a class="pill" href="https://github.com/steipete/CodexBar">macOS version</a>
+</section>
+
+<!-- ── Footer ── -->
+<footer class="foot wrap">
+  <span>Built by <a href="https://github.com/babakarto">Alessandro</a> &middot;
+  Windows port of <a href="https://codexbar.app">CodexBar</a> by
+  <a href="https://steipete.me">Peter Steinberger</a></span>
+  <span class="foot-links">
+    <a href="https://github.com/babakarto/CodexBar-Win/blob/master/LICENSE">MIT</a>
+    <a href="https://github.com/babakarto/CodexBar-Win">GitHub</a>
+  </span>
+</footer>
+
+<script>
+function copyInstall(btn) {
+  navigator.clipboard.writeText('pip install pystray Pillow customtkinter pywinpty');
+  btn.textContent = 'Copied!';
+  btn.classList.add('copied');
+  setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+}
+</script>
+</body>
+</html>
