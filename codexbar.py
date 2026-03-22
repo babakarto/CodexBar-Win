@@ -345,7 +345,19 @@ class ClaudeDataFetcher:
             "cost_today": 0.0, "cost_today_tokens": "0",
             "cost_30d": 0.0, "cost_30d_tokens": "0",
             "source": "none", "error": None,
+            "installed": False,
         }
+
+    def _is_claude_installed(self):
+        """Check if Claude Code is installed (CLI in PATH or ~/.claude exists)."""
+        claude_dir = Path.home() / ".claude"
+        if claude_dir.exists():
+            return True
+        if self._find_claude():
+            return True
+        if shutil.which("claude") or shutil.which("claude.cmd"):
+            return True
+        return False
 
     def fetch_all(self):
         print("[CodexBar] Fetching real usage data...")
@@ -394,6 +406,7 @@ class ClaudeDataFetcher:
             print("  -- Logs: no JSONL found")
 
         self.data["updated"] = datetime.now().strftime("Updated %H:%M")
+        self.data["installed"] = self._is_claude_installed()
         return self.data
 
     def _fetch_cli(self):
@@ -1512,7 +1525,26 @@ class CodexBarPopup(ctk.CTkToplevel):
                 ctk.CTkLabel(r, text=val, font=("Segoe UI Semibold", 13),
                              text_color=self.CL_PRIMARY).pack(side="right")
 
-        if not has_data and not has_cost:
+        if not d.get("installed", True) and not has_data and not has_cost:
+            ctk.CTkFrame(parent, fg_color=self.CL_DIVIDER,
+                         height=1, corner_radius=0).pack(fill="x", padx=20, pady=(12, 0))
+            nd = ctk.CTkFrame(parent, fg_color="transparent")
+            nd.pack(fill="x", padx=20, pady=(20, 8))
+            ctk.CTkLabel(nd, text="Claude Code not detected",
+                         font=("Segoe UI Semibold", 14),
+                         text_color=self.CL_PRIMARY).pack(pady=(0, 4))
+            ctk.CTkLabel(nd, text="Install the CLI to see your usage",
+                         font=("Segoe UI", 11),
+                         text_color=self.CL_SECOND).pack(pady=(0, 12))
+            ctk.CTkButton(nd, text="Install Claude Code",
+                          font=("Segoe UI Semibold", 13),
+                          text_color="#FFFFFF", fg_color=self.CL_ACCENT,
+                          hover_color="#C4654A", corner_radius=10,
+                          height=38, width=200,
+                          command=lambda: self._open_url(
+                              "https://docs.anthropic.com/en/docs/claude-code/overview")
+                          ).pack()
+        elif not has_data and not has_cost:
             nd = ctk.CTkFrame(parent, fg_color="transparent")
             nd.pack(fill="x", padx=20, pady=24)
             ctk.CTkLabel(nd, text="No session data yet", font=("Segoe UI", 13),
@@ -1594,12 +1626,21 @@ class CodexBarPopup(ctk.CTkToplevel):
             ctk.CTkFrame(parent, fg_color=self.OA_DIVIDER,
                          height=1, corner_radius=0).pack(fill="x", padx=20, pady=(12, 0))
             nd = ctk.CTkFrame(parent, fg_color="transparent")
-            nd.pack(fill="x", padx=20, pady=24)
-            ctk.CTkLabel(nd, text="Codex not installed", font=("Segoe UI", 13),
-                         text_color=self.OA_SECOND).pack()
-            ctk.CTkLabel(nd, text="Install: npm i -g @openai/codex",
+            nd.pack(fill="x", padx=20, pady=(20, 8))
+            ctk.CTkLabel(nd, text="Codex not detected",
+                         font=("Segoe UI Semibold", 14),
+                         text_color=self.OA_PRIMARY).pack(pady=(0, 4))
+            ctk.CTkLabel(nd, text="Install the CLI to see your usage",
                          font=("Segoe UI", 11),
-                         text_color=self.OA_TERTIARY).pack(pady=(4, 0))
+                         text_color=self.OA_SECOND).pack(pady=(0, 12))
+            ctk.CTkButton(nd, text="Install Codex",
+                          font=("Segoe UI Semibold", 13),
+                          text_color="#FFFFFF", fg_color=self.OA_GREEN,
+                          hover_color="#0D8A6A", corner_radius=10,
+                          height=38, width=200,
+                          command=lambda: self._open_url(
+                              "https://github.com/openai/codex")
+                          ).pack()
             ctk.CTkFrame(parent, fg_color="transparent", height=6).pack(fill="x")
             return
 
