@@ -9,8 +9,8 @@ Windows port of [steipete/CodexBar](https://github.com/steipete/CodexBar) for ma
 ![License MIT](https://img.shields.io/badge/license-MIT-green)
 
 <p align="center">
-  <img src="docs/claude.png?v=4" alt="CodexBar — Claude tab" width="370">
-  <img src="docs/codex.png?v=4" alt="CodexBar — Codex tab" width="370">
+  <img src="docs/claude.png?v=5" alt="CodexBar — Claude tab" width="370">
+  <img src="docs/codex.png?v=5" alt="CodexBar — Codex tab" width="370">
 </p>
 
 ## Download
