@@ -1,0 +1,4 @@
+pystray>=0.19.5
+Pillow>=10.0
+customtkinter>=5.2
+pywinpty>=2.0
