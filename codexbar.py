@@ -1509,9 +1509,14 @@ class CodexBarPopup(ctk.CTkToplevel):
         if has_cost:
             ctk.CTkFrame(parent, fg_color=self.CL_DIVIDER,
                          height=1, corner_radius=0).pack(fill="x", padx=20, pady=(8, 0))
-            ctk.CTkLabel(parent, text="Cost", font=("Segoe UI Semibold", 13),
+            ctk.CTkLabel(parent, text="API Cost Estimate",
+                         font=("Segoe UI Semibold", 13),
                          text_color=self.CL_TERTIARY,
-                         anchor="w").pack(fill="x", padx=22, pady=(10, 4))
+                         anchor="w").pack(fill="x", padx=22, pady=(10, 0))
+            ctk.CTkLabel(parent, text="Estimated API equivalent — not billed",
+                         font=("Segoe UI", 10),
+                         text_color=self.CL_TERTIARY,
+                         anchor="w").pack(fill="x", padx=22, pady=(0, 4))
             card = ctk.CTkFrame(parent, fg_color=self.CL_SURFACE, corner_radius=10)
             card.pack(fill="x", padx=20, pady=(0, 2))
             inner = ctk.CTkFrame(card, fg_color="transparent")
@@ -1656,9 +1661,14 @@ class CodexBarPopup(ctk.CTkToplevel):
         if has_cost:
             ctk.CTkFrame(parent, fg_color=self.OA_DIVIDER,
                          height=1, corner_radius=0).pack(fill="x", padx=20, pady=(8, 0))
-            ctk.CTkLabel(parent, text="Cost", font=("Segoe UI Semibold", 13),
+            ctk.CTkLabel(parent, text="API Cost Estimate",
+                         font=("Segoe UI Semibold", 13),
                          text_color=self.OA_TERTIARY,
-                         anchor="w").pack(fill="x", padx=22, pady=(10, 4))
+                         anchor="w").pack(fill="x", padx=22, pady=(10, 0))
+            ctk.CTkLabel(parent, text="Estimated API equivalent — not billed",
+                         font=("Segoe UI", 10),
+                         text_color=self.OA_TERTIARY,
+                         anchor="w").pack(fill="x", padx=22, pady=(0, 4))
             card = ctk.CTkFrame(parent, fg_color=self.OA_CARD, corner_radius=10)
             card.pack(fill="x", padx=20, pady=(0, 2))
             inner = ctk.CTkFrame(card, fg_color="transparent")
