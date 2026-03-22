@@ -1,6 +1,6 @@
 # CodexBar for Windows
 
-> System tray app that shows your **real Claude Code usage** — session limits, weekly limits, reset times, and API costs — right from the Windows taskbar.
+> System tray app that shows your **real Claude Code & OpenAI Codex usage** — session limits, weekly limits, reset times, and API costs — right from the Windows taskbar.
 
 Windows port of [steipete/CodexBar](https://github.com/steipete/CodexBar) for macOS.
 
@@ -9,7 +9,8 @@ Windows port of [steipete/CodexBar](https://github.com/steipete/CodexBar) for ma
 ![License MIT](https://img.shields.io/badge/license-MIT-green)
 
 <p align="center">
-  <img src="docs/codexbar.png?v=3" alt="CodexBar for Windows" width="760">
+  <img src="docs/claude.png?v=4" alt="CodexBar — Claude tab" width="370">
+  <img src="docs/codex.png?v=4" alt="CodexBar — Codex tab" width="370">
 </p>
 
 ## Download
@@ -39,11 +40,12 @@ Or double-click `CodexBar.bat` — it installs dependencies and launches.
 
 ## Features
 
+- **Dual provider** — Claude Code + OpenAI Codex tabs with smooth animated transitions
 - **Live usage bars** — session and weekly limits with color-coded percentages
 - **Reset countdowns** — know exactly when your limits refresh
 - **Cost tracking** — today's spend and 30-day totals from local logs
-- **Native popup** — customtkinter window with rounded corners, slide-up animation, frosted glass
-- **Claude branding** — orange palette, starburst logo, plan badge
+- **Native popup** — customtkinter window with rounded corners, slide-up animation
+- **Provider branding** — Claude orange palette + OpenAI dark/green theme, tray icon switches per tab
 - **Auto-refresh** — updates every 5 minutes
 - **Zero config** — reads everything Claude Code already stores locally
 
@@ -64,7 +66,7 @@ CodexBar tries multiple methods in order, using the first that succeeds:
 |---|---|---|
 | **UI** | SwiftUI menu bar popup | customtkinter system tray popup |
 | **Language** | Swift | Python |
-| **Providers** | 16+ (Claude, Cursor, Copilot, Gemini...) | Claude Code |
+| **Providers** | 16+ (Claude, Cursor, Copilot, Gemini...) | Claude Code + OpenAI Codex |
 | **Data source** | CLI PTY | CLI PTY → OAuth → Cookies → JSONL |
 | **Install** | `brew install --cask steipete/tap/codexbar` | Download .exe or `pip install` |
 | **Auto-update** | Sparkle framework | GitHub Releases |
