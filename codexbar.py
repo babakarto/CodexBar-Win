@@ -53,6 +53,17 @@ except ImportError:
     print("[CodexBar] winpty not found (pip install pywinpty). CLI /usage disabled.")
 
 
+class _APPBARDATA(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.wintypes.DWORD),
+        ("hWnd", ctypes.wintypes.HWND),
+        ("uCallbackMessage", ctypes.wintypes.UINT),
+        ("uEdge", ctypes.wintypes.UINT),
+        ("rc", ctypes.wintypes.RECT),
+        ("lParam", ctypes.wintypes.LPARAM),
+    ]
+
+
 def _resource_path(relative_path):
     """Get absolute path to resource — works for dev and PyInstaller .exe."""
     if getattr(sys, 'frozen', False):
@@ -1224,6 +1235,22 @@ class CodexBarPopup(ctk.CTkToplevel):
             from ctypes import wintypes
             rect = wintypes.RECT()
             ctypes.windll.user32.SystemParametersInfoW(48, 0, ctypes.byref(rect), 0)
+            appbar = _APPBARDATA()
+            appbar.cbSize = ctypes.sizeof(appbar)
+            state = ctypes.windll.shell32.SHAppBarMessage(4, ctypes.byref(appbar))
+            if state & 0x1:
+                taskbar = ctypes.windll.user32.FindWindowW("Shell_TrayWnd", None)
+                if taskbar:
+                    appbar.hWnd = taskbar
+                    if ctypes.windll.shell32.SHAppBarMessage(5, ctypes.byref(appbar)):
+                        if appbar.uEdge == 0:
+                            rect.left = max(rect.left, appbar.rc.right)
+                        elif appbar.uEdge == 1:
+                            rect.top = max(rect.top, appbar.rc.bottom)
+                        elif appbar.uEdge == 2:
+                            rect.right = min(rect.right, appbar.rc.left)
+                        elif appbar.uEdge == 3:
+                            rect.bottom = min(rect.bottom, appbar.rc.top)
             scale = self._get_window_scaling()
             return (int(rect.right / scale), int(rect.bottom / scale),
                     int(rect.left / scale), int(rect.top / scale))
