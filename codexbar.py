@@ -963,8 +963,9 @@ class CodexDataFetcher:
                     # decode JWT payload (base64 middle segment)
                     parts = at.split(".")
                     if len(parts) >= 2:
-                        payload = parts[1] + "=" * (4 - len(parts[1]) % 4)
-                        claims = json.loads(base64.b64decode(payload))
+                        seg = parts[1]
+                        seg += "=" * ((4 - len(seg) % 4) % 4)
+                        claims = json.loads(base64.urlsafe_b64decode(seg))
                         plan = claims.get("https://api.openai.com/auth", {}).get(
                             "chatgpt_plan_type", "")
                         if plan:
@@ -1007,7 +1008,7 @@ class CodexDataFetcher:
             # primary = 5h window
             primary = rl.get("primary", {})
             if primary:
-                d["session_used_pct"] = int(primary.get("used_percent", 0))
+                d["session_used_pct"] = self._to_pct(primary.get("used_percent", 0))
                 resets_at = primary.get("resets_at")
                 if resets_at:
                     d["session_reset"] = self._format_reset(resets_at)
@@ -1015,7 +1016,7 @@ class CodexDataFetcher:
             # secondary = weekly window
             secondary = rl.get("secondary", {})
             if secondary:
-                d["weekly_used_pct"] = int(secondary.get("used_percent", 0))
+                d["weekly_used_pct"] = self._to_pct(secondary.get("used_percent", 0))
                 resets_at = secondary.get("resets_at")
                 if resets_at:
                     d["weekly_reset"] = self._format_reset(resets_at)
@@ -1036,19 +1037,25 @@ class CodexDataFetcher:
                 tokens = self._extract_total_tokens(jf)
                 if not tokens:
                     continue
-                inp = tokens.get("input_tokens", 0)
-                out = tokens.get("output_tokens", 0)
+                inp = int(tokens.get("input_tokens", 0) or 0)
+                out = int(tokens.get("output_tokens", 0) or 0)
                 total_in += inp
                 total_out += out
 
-                # check if file is from today
+                # check if file is from today (prefer filename, fallback mtime)
+                same_day = False
                 try:
                     ts_str = jf.stem.split("rollout-")[1][:10]  # "2026-03-22"
-                    if datetime.strptime(ts_str, "%Y-%m-%d").date() == today:
-                        today_in += inp
-                        today_out += out
+                    same_day = datetime.strptime(ts_str, "%Y-%m-%d").date() == today
                 except Exception:
-                    pass
+                    try:
+                        same_day = datetime.fromtimestamp(jf.stat().st_mtime).date() == today
+                    except Exception:
+                        same_day = False
+
+                if same_day:
+                    today_in += inp
+                    today_out += out
             except Exception:
                 continue
 
@@ -1067,56 +1074,72 @@ class CodexDataFetcher:
         d["cost_30d_tokens"] = fmt(total_in + total_out)
 
     @staticmethod
-    def _extract_rate_limits(jsonl_path):
-        """Return the last rate_limits dict from a JSONL file."""
-        last = None
+    def _iter_token_count_events(jsonl_path):
+        """Yield token_count-like payloads from different Codex JSONL schemas."""
         try:
             with open(jsonl_path, "r", encoding="utf-8", errors="ignore") as fh:
                 for line in fh:
                     line = line.strip()
-                    if not line or "rate_limits" not in line:
+                    if not line:
                         continue
                     try:
                         e = json.loads(line)
-                        p = e.get("payload", {})
-                        if isinstance(p, dict) and p.get("type") == "token_count":
-                            rl = p.get("rate_limits")
-                            if rl:
-                                last = rl
                     except Exception:
-                        pass
+                        continue
+
+                    candidates = []
+                    if isinstance(e, dict):
+                        candidates.append(e)
+                        p = e.get("payload")
+                        if isinstance(p, dict):
+                            candidates.append(p)
+
+                    for c in candidates:
+                        if not isinstance(c, dict):
+                            continue
+                        if c.get("type") == "token_count":
+                            yield c
+
         except Exception:
-            pass
+            return
+
+    @classmethod
+    def _extract_rate_limits(cls, jsonl_path):
+        """Return the last rate_limits dict from a JSONL file."""
+        last = None
+        for evt in cls._iter_token_count_events(jsonl_path):
+            rl = evt.get("rate_limits")
+            if isinstance(rl, dict):
+                last = rl
+        return last
+
+    @classmethod
+    def _extract_total_tokens(cls, jsonl_path):
+        """Return total_token_usage from the last token_count entry."""
+        last = None
+        for evt in cls._iter_token_count_events(jsonl_path):
+            info = evt.get("info") if isinstance(evt.get("info"), dict) else {}
+            t = info.get("total_token_usage")
+            if isinstance(t, dict):
+                last = t
         return last
 
     @staticmethod
-    def _extract_total_tokens(jsonl_path):
-        """Return total_token_usage from the last token_count entry."""
-        last = None
+    def _to_pct(value):
         try:
-            with open(jsonl_path, "r", encoding="utf-8", errors="ignore") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line or "total_token_usage" not in line:
-                        continue
-                    try:
-                        e = json.loads(line)
-                        p = e.get("payload", {})
-                        if isinstance(p, dict) and p.get("type") == "token_count":
-                            t = p.get("info", {}).get("total_token_usage")
-                            if t:
-                                last = t
-                    except Exception:
-                        pass
+            return max(0, min(100, int(float(value))))
         except Exception:
-            pass
-        return last
+            return 0
 
     @staticmethod
     def _format_reset(epoch):
         """Convert epoch timestamp to human-readable countdown."""
         try:
-            dt = datetime.fromtimestamp(epoch)
+            ts = float(epoch)
+            # handle milliseconds timestamps
+            if ts > 1e12:
+                ts /= 1000.0
+            dt = datetime.fromtimestamp(ts)
             delta = dt - datetime.now()
             secs = max(0, int(delta.total_seconds()))
             h, m = divmod(secs // 60, 60)
