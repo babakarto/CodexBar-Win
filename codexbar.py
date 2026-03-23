@@ -513,57 +513,43 @@ class ClaudeDataFetcher:
         d = self._empty()
         d["source"] = "cli"
 
-        # After ANSI stripping the Windows PTY often puts all fields on
-        # one line.  Insert newlines before known section headers and
-        # before "Resets" / "%used" so the line-by-line parser works.
-        clean = re.sub(r'(Current\s+session)', r'\n\1', clean, flags=re.I)
-        clean = re.sub(r'(Current\s+week)', r'\n\1', clean, flags=re.I)
-        clean = re.sub(r'(\d+\s*%\s*used)', r'\n\1', clean, flags=re.I)
-        clean = re.sub(r'([Rr]es(?:et)?s?\s+\w)', r'\n\1', clean)
+        # Windows PTY output sometimes collapses all usage fields into one line,
+        # so parse by section blocks instead of relying on line order/state.
+        compact = re.sub(r'\s+', ' ', clean).strip()
 
-        lines = clean.split("\n")
+        def parse_block(text):
+            pct = None
+            reset = None
 
-        section = None        # "session" | "weekly" | "sonnet"
-        for line in lines:
-            lo = line.lower().strip()
-
-            # ── section headers ──
-            # Don't 'continue' — the header and data can land on the
-            # same line after ANSI stripping in the Windows PTY.
-            if "current session" in lo:
-                section = "session"
-            elif "current week" in lo and "sonnet" not in lo:
-                section = "weekly"
-            elif "sonnet" in lo and "week" in lo:
-                section = "sonnet"
-
-            if not section:
-                continue
-
-            # ── percentage: "6%used" / "6% used" ──
-            m = re.search(r'(\d+)\s*%\s*used', line, re.I)
+            m = re.search(r'(\d+)\s*%\s*used', text, re.I)
             if m:
                 pct = int(m.group(1))
-                if section == "session":
-                    d["session_used_pct"] = pct
-                elif section == "weekly":
-                    d["weekly_used_pct"] = pct
 
-            # ── reset: tolerant pattern for "Resets"/"Reses"/"Reset" ──
-            # ANSI stripping can eat characters, so match broadly:
-            #   "Resets 4pm …", "Reses4pm …", "Reset Mar 27 …"
-            rm = re.search(
-                r'[Rr]es[et]*s?\s*(.+)', line)
+            rm = re.search(r'[Rr]es[et]*s?\s*(.+)', text)
             if rm:
                 val = rm.group(1).strip()
-                # drop trailing noise ("Esc to cancel", timezone in parens)
-                val = re.sub(r'\s*Esc.*$', '', val).rstrip(". ")
+                val = re.sub(r'\s*Esc.*$', '', val).rstrip('. ')
                 val = re.sub(r'\s*\([^)]*\)\s*$', '', val).strip()
                 if val and len(val) > 2:
-                    if section == "session":
-                        d["session_reset"] = val
-                    elif section == "weekly":
-                        d["weekly_reset"] = val
+                    reset = val
+
+            return pct, reset
+
+        sblk = re.search(r'Current\s+session(.*?)(?=Current\s+week|$)', compact, re.I)
+        if sblk:
+            spct, sreset = parse_block(sblk.group(1))
+            if spct is not None:
+                d["session_used_pct"] = spct
+            if sreset:
+                d["session_reset"] = sreset
+
+        wblk = re.search(r'Current\s+week(.*?)(?=Sonnet\s+week|$)', compact, re.I)
+        if wblk:
+            wpct, wreset = parse_block(wblk.group(1))
+            if wpct is not None:
+                d["weekly_used_pct"] = wpct
+            if wreset:
+                d["weekly_reset"] = wreset
 
         # ── plan from welcome screen: "Claude Max" / "ClaudeMax" ──
         m = re.search(r'Claude\s*(Max|Pro|Team|Enterprise|Free)',
