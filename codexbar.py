@@ -914,6 +914,7 @@ class CodexDataFetcher:
             "cost_today": 0, "cost_today_tokens": "0",
             "cost_30d": 0, "cost_30d_tokens": "0",
             "model": "",
+            "signed_in": False,
             "error": None, "available": False,
         }
 
@@ -946,6 +947,9 @@ class CodexDataFetcher:
                 tokens = aj.get("tokens", {})
                 at = tokens.get("access_token", "")
                 if at:
+                    d["signed_in"] = True
+                    if d["source"] == "none":
+                        d["source"] = "auth"
                     # decode JWT payload (base64 middle segment)
                     parts = at.split(".")
                     if len(parts) >= 2:
@@ -1686,11 +1690,18 @@ class CodexBarPopup(ctk.CTkToplevel):
                          height=1, corner_radius=0).pack(fill="x", padx=20, pady=(12, 0))
             nd = ctk.CTkFrame(parent, fg_color="transparent")
             nd.pack(fill="x", padx=20, pady=24)
-            ctk.CTkLabel(nd, text="No session data yet", font=("Segoe UI", 13),
-                         text_color=self.OA_SECOND).pack()
-            ctk.CTkLabel(nd, text="Run a session in Codex CLI",
-                         font=("Segoe UI", 11),
-                         text_color=self.OA_TERTIARY).pack(pady=(4, 0))
+            if d.get("signed_in"):
+                ctk.CTkLabel(nd, text="Codex signed in", font=("Segoe UI", 13),
+                             text_color=self.OA_SECOND).pack()
+                ctk.CTkLabel(nd, text="No usage metrics found yet in local Codex data",
+                             font=("Segoe UI", 11),
+                             text_color=self.OA_TERTIARY).pack(pady=(4, 0))
+            else:
+                ctk.CTkLabel(nd, text="No session data yet", font=("Segoe UI", 13),
+                             text_color=self.OA_SECOND).pack()
+                ctk.CTkLabel(nd, text="Run a session in Codex CLI",
+                             font=("Segoe UI", 11),
+                             text_color=self.OA_TERTIARY).pack(pady=(4, 0))
 
         ctk.CTkFrame(parent, fg_color="transparent", height=6).pack(fill="x")
 
