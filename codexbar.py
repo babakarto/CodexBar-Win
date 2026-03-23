@@ -1301,6 +1301,11 @@ class CodexBarPopup(ctk.CTkToplevel):
             self._tab_inner.configure(fg_color=self.CL_TRACK)
             self._cl_tab_btn.configure(fg_color=self.CL_LITE, hover_color=self.CL_LITE)
             self._oa_tab_btn.configure(fg_color="transparent", hover_color=self.CL_HOVER)
+            self._close_btn.configure(
+                text_color=self.CL_SECOND,
+                fg_color="transparent",
+                hover_color=self.CL_HOVER,
+            )
             self.configure(fg_color=self.CL_BG)
             self._footer_frame.configure(fg_color=self.CL_BG)
             self._footer_divider.configure(fg_color=self.CL_DIVIDER)
@@ -1312,6 +1317,11 @@ class CodexBarPopup(ctk.CTkToplevel):
             self._tab_inner.configure(fg_color=self.OA_TRACK)
             self._cl_tab_btn.configure(fg_color="transparent", hover_color=self.OA_HOVER)
             self._oa_tab_btn.configure(fg_color=self.OA_GREEN_LT, hover_color=self.OA_GREEN_LT)
+            self._close_btn.configure(
+                text_color=self.OA_SECOND,
+                fg_color="transparent",
+                hover_color=self.OA_HOVER,
+            )
             self.configure(fg_color=self.OA_BG)
             self._footer_frame.configure(fg_color=self.OA_BG)
             self._footer_divider.configure(fg_color=self.OA_DIVIDER)
@@ -1433,6 +1443,20 @@ class CodexBarPopup(ctk.CTkToplevel):
             corner_radius=8, height=26, width=34,
             command=lambda: self._switch_tab("openai"))
         self._oa_tab_btn.pack(side="left", padx=(1, 2), pady=2)
+
+        self._close_btn = ctk.CTkButton(
+            tab_bar,
+            text="−",
+            font=("Segoe UI Semibold", 14),
+            text_color=self.CL_SECOND,
+            fg_color="transparent",
+            hover_color=self.CL_HOVER,
+            corner_radius=8,
+            height=26,
+            width=34,
+            command=self._close,
+        )
+        self._close_btn.pack(side="right", padx=(0, 10), pady=4)
 
         # ── CLAUDE CONTENT ──
         self._claude_frame = ctk.CTkFrame(self, fg_color=self.CL_BG, corner_radius=0)
