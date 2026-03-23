@@ -535,7 +535,7 @@ class ClaudeDataFetcher:
 
             return pct, reset
 
-        sblk = re.search(r'Current\s+session(.*?)(?=Current\s+week|$)', compact, re.I)
+        sblk = re.search(r'Current\s*session(.*?)(?=Current\s*week|$)', compact, re.I)
         if sblk:
             spct, sreset = parse_block(sblk.group(1))
             if spct is not None:
@@ -543,7 +543,7 @@ class ClaudeDataFetcher:
             if sreset:
                 d["session_reset"] = sreset
 
-        wblk = re.search(r'Current\s+week(.*?)(?=Sonnet\s+week|$)', compact, re.I)
+        wblk = re.search(r'Current\s*week(.*?)(?=Sonnet\s*week|Extra\s*usage|$)', compact, re.I)
         if wblk:
             wpct, wreset = parse_block(wblk.group(1))
             if wpct is not None:
