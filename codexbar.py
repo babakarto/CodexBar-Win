@@ -1166,7 +1166,7 @@ class CodexBarPopup(ctk.CTkToplevel):
 
     def __init__(self, master, claude_data, codex_data=None, *,
                  on_close=None, on_refresh=None, on_quit=None,
-                 on_tab_switch=None):
+                 on_tab_switch=None, initial_tab="claude"):
         super().__init__(master)
         self._claude = claude_data
         self._codex = codex_data or CodexDataFetcher._empty()
@@ -1174,7 +1174,7 @@ class CodexBarPopup(ctk.CTkToplevel):
         self._on_refresh = on_refresh
         self._on_quit = on_quit
         self._on_tab_switch = on_tab_switch
-        self._active_tab = "claude"
+        self._active_tab = "openai" if initial_tab == "openai" else "claude"
 
         self.overrideredirect(True)
         self.configure(fg_color=self.CL_BG)
@@ -1193,6 +1193,8 @@ class CodexBarPopup(ctk.CTkToplevel):
         self._oa_logo_big = ctk.CTkImage(oa_big, size=(28, 28)) if oa_big else None
 
         self._build_ui()
+        if self._active_tab != "claude":
+            self._do_swap()
 
         self.update_idletasks()
         work = self._work_area()
@@ -1797,6 +1799,7 @@ class CodexBarApp:
         self.popup = None
         self.running = True
         self.codex_data = None
+        self._active_provider = "claude"
 
     def start(self):
         print("[CodexBar] Fetching your real usage data...\n")
@@ -1825,7 +1828,12 @@ class CodexBarApp:
             Menu.SEPARATOR,
             MenuItem('Quit', self._tray_quit),
         )
-        self.tray = pystray.Icon('CodexBar', make_icon(sl, wl), 'CodexBar', menu)
+        self.tray = pystray.Icon(
+            'CodexBar',
+            make_icon(sl, wl, provider=self._active_provider),
+            'CodexBar',
+            menu
+        )
         threading.Thread(target=self.tray.run, daemon=True).start()
 
         # ── auto-refresh every 5 min ──
@@ -1870,6 +1878,7 @@ class CodexBarApp:
             on_refresh=lambda: self.root.after(0, self._do_refresh),
             on_quit=lambda: self.root.after(0, self._do_quit),
             on_tab_switch=self._on_tab_switch,
+            initial_tab=self._active_provider,
         )
 
     def _on_popup_closed(self):
@@ -1880,8 +1889,8 @@ class CodexBarApp:
 
     def _set_tray_icon(self, provider):
         try:
-            p = "openai" if provider == "openai" else "claude"
-            self.tray.icon = make_icon(provider=p)
+            self._active_provider = "openai" if provider == "openai" else "claude"
+            self.tray.icon = make_icon(provider=self._active_provider)
         except Exception:
             pass
 
@@ -1897,7 +1906,8 @@ class CodexBarApp:
             d = self.fetcher.data
             self.tray.icon = make_icon(
                 (100 - d["session_used_pct"]) / 100,
-                (100 - d["weekly_used_pct"]) / 100)
+                (100 - d["weekly_used_pct"]) / 100,
+                provider=self._active_provider)
             print("[CodexBar] Refreshed")
         threading.Thread(target=bg, daemon=True).start()
 
