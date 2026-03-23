@@ -363,7 +363,7 @@ class ClaudeDataFetcher:
         print("[CodexBar] Fetching real usage data...")
         got_usage = False
 
-        # 1) Try CLI
+        # 1) Try CLI first (fast), but keep going: API is usually more reliable.
         cli = self._fetch_cli()
         if cli and cli.get("source") == "cli":
             self.data = cli
@@ -373,16 +373,16 @@ class ClaudeDataFetcher:
             print("  -- CLI: not available")
 
         # 2) Try OAuth token from ~/.claude/.credentials.json
-        if not got_usage:
-            api = self._fetch_oauth_api()
-            if api and api.get("source") == "api":
-                self.data = api
-                got_usage = True
-                print(f"  OK OAuth: session {api['session_used_pct']}%, weekly {api['weekly_used_pct']}%")
-            else:
-                print("  -- OAuth: not available")
+        api = self._fetch_oauth_api()
+        if api and api.get("source") == "api":
+            # Prefer API values over CLI when available.
+            self.data = api
+            got_usage = True
+            print(f"  OK OAuth: session {api['session_used_pct']}%, weekly {api['weekly_used_pct']}%")
+        else:
+            print("  -- OAuth: not available")
 
-        # 3) Try browser cookie → Claude API
+        # 3) Try browser cookie → Claude API only if we still have no usage data
         if not got_usage:
             api = self._fetch_cookie_api()
             if api and api.get("source") == "api":
