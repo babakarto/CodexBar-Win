@@ -392,7 +392,12 @@ class ClaudeDataFetcher:
             else:
                 print("  -- Cookie: not available")
 
-        # 4) Always try JSONL for cost data
+        # 4) Enrich plan name from OAuth account API if plan is generic
+        #    (CLI only reports "Max"/"Pro", not "Max 20x" etc.)
+        if self.data.get("plan") in ("Max", "Unknown", ""):
+            self._enrich_plan_from_account()
+
+        # 5) Always try JSONL for cost data
         cost = self._fetch_jsonl()
         if cost:
             self.data["cost_today"] = cost["cost_today"]
@@ -577,6 +582,68 @@ class ClaudeDataFetcher:
 
     _CREDS_PATH = Path.home() / ".claude" / ".credentials.json"
 
+    @staticmethod
+    def _resolve_plan_name(tier_str):
+        """Resolve a rateLimitTier string to a clean plan name.
+
+        Examples:
+            "default_claude_max_5x"  -> "Max 5x"
+            "default_claude_max_20x" -> "Max 20x"
+            "default_claude_max"     -> "Max"
+            "default_claude_pro"     -> "Pro"
+            "claude_team"            -> "Team"
+            "default_claude"         -> "Pro"  (fallback)
+        """
+        lo = (tier_str or "").lower()
+        if "max" in lo:
+            # extract multiplier if present (e.g. "5x", "20x")
+            m = re.search(r'(\d+x)', lo)
+            return f"Max {m.group(1)}" if m else "Max"
+        if "enterprise" in lo:
+            return "Enterprise"
+        if "team" in lo:
+            return "Team"
+        if "pro" in lo:
+            return "Pro"
+        if "free" in lo:
+            return "Free"
+        if "ultra" in lo:
+            return "Ultra"
+        if "claude" in lo:
+            return "Pro"  # default_claude with stripe billing = Pro
+        return ""
+
+    def _enrich_plan_from_account(self):
+        """Fetch live rate_limit_tier from /api/oauth/account to get
+        the accurate plan name with multiplier (e.g. 'Max 20x')."""
+        if not self._CREDS_PATH.exists():
+            return
+        try:
+            with open(self._CREDS_PATH, "r", encoding="utf-8") as f:
+                token = json.load(f).get("claudeAiOauth", {}).get("accessToken")
+            if not token:
+                return
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "anthropic-beta": "oauth-2025-04-20",
+                "User-Agent": "claude-code/1.0",
+                "Accept": "application/json",
+            }
+            req = Request("https://api.anthropic.com/api/oauth/account",
+                          headers=headers)
+            with urlopen(req, timeout=10) as resp:
+                acct = json.loads(resp.read())
+            for mem in acct.get("memberships") or []:
+                tier = (mem.get("organization") or {}).get("rate_limit_tier", "")
+                if tier:
+                    resolved = self._resolve_plan_name(tier)
+                    if resolved:
+                        self.data["plan"] = resolved
+                        print(f"    Plan enriched: {tier} -> {resolved}")
+                    break
+        except Exception as e:
+            print(f"    Plan enrich err (non-fatal): {e}")
+
     def _fetch_oauth_api(self):
         """Read the OAuth access token that Claude Code stores locally,
         then call the Claude.ai API to get live usage data."""
@@ -592,13 +659,19 @@ class ClaudeDataFetcher:
 
             # pre-fill plan from local credentials (no network needed)
             tier = oauth.get("rateLimitTier") or oauth.get("subscriptionType") or ""
-            plan_local = tier.replace("default_claude_", "").replace("_", " ").title() or "Pro"
+            plan_local = self._resolve_plan_name(tier) or "Pro"
 
             print(f"    OAuth token found ({len(token)} chars), plan hint: {plan_local}")
         except Exception as e:
             print(f"    OAuth creds err: {e}")
             return None
 
+        # Try the direct Anthropic OAuth usage endpoint first (more reliable)
+        result = self._fetch_oauth_direct(token, plan_local)
+        if result:
+            return result
+
+        # Fall back to claude.ai web API
         result = self._call_claude_api(
             auth_header=("Authorization", f"Bearer {token}"),
             plan_hint=plan_local,
@@ -608,6 +681,88 @@ class ClaudeDataFetcher:
         if result is None and plan_local:
             self.data["plan"] = plan_local
         return result
+
+    def _fetch_oauth_direct(self, token, plan_hint):
+        """Call the Anthropic OAuth endpoints directly.
+
+        Uses the same endpoints as the upstream macOS CodexBar:
+        - GET /api/oauth/account  → live rate_limit_tier (plan name)
+        - GET /api/oauth/usage    → utilization percentages + reset times
+        """
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "User-Agent": "claude-code/1.0",
+            "Accept": "application/json",
+        }
+
+        d = self._empty()
+        d["source"] = "api"
+        d["plan"] = plan_hint or "Pro"
+
+        # ── step 1: get live plan from /account ──
+        try:
+            req = Request("https://api.anthropic.com/api/oauth/account",
+                          headers=headers)
+            with urlopen(req, timeout=15) as resp:
+                acct = json.loads(resp.read())
+            memberships = acct.get("memberships") or []
+            for mem in memberships:
+                org = mem.get("organization") or {}
+                tier = org.get("rate_limit_tier") or ""
+                if tier:
+                    resolved = self._resolve_plan_name(tier)
+                    if resolved:
+                        d["plan"] = resolved
+                        print(f"    OAuth account tier: {tier} -> {resolved}")
+                    break
+        except (URLError, HTTPError, json.JSONDecodeError) as e:
+            print(f"    OAuth /account err (non-fatal): {e}")
+
+        # ── step 2: get usage from /usage ──
+        try:
+            req = Request("https://api.anthropic.com/api/oauth/usage",
+                          headers=headers)
+            with urlopen(req, timeout=15) as resp:
+                usage = json.loads(resp.read())
+        except (URLError, HTTPError, json.JSONDecodeError) as e:
+            print(f"    OAuth direct /usage err: {e}")
+            return None
+
+        print(f"    OAuth direct usage keys: {list(usage.keys())}")
+
+        # Parse five_hour (session) and seven_day (weekly) windows
+        # Shape: {"utilization": <number>, "resets_at": "<ISO8601>"}
+        five_hour = usage.get("five_hour") or {}
+        seven_day = usage.get("seven_day") or {}
+
+        util_5h = five_hour.get("utilization")
+        if util_5h is not None:
+            d["session_used_pct"] = max(0, min(100, int(util_5h)))
+
+        util_7d = seven_day.get("utilization")
+        if util_7d is not None:
+            d["weekly_used_pct"] = max(0, min(100, int(util_7d)))
+
+        # Parse reset times
+        for blob, key in [(five_hour, "session_reset"), (seven_day, "weekly_reset")]:
+            resets_at = blob.get("resets_at")
+            if resets_at:
+                try:
+                    dt = datetime.fromisoformat(str(resets_at).replace("Z", "+00:00"))
+                    delta = dt - datetime.now(dt.tzinfo)
+                    secs = max(0, int(delta.total_seconds()))
+                    h, m = divmod(secs // 60, 60)
+                    if h >= 24:
+                        d[key] = f"{h // 24}d {h % 24}h"
+                    else:
+                        d[key] = f"{h}h {m:02d}m"
+                except Exception:
+                    pass
+
+        print(f"    OAuth direct: session {d['session_used_pct']}%, "
+              f"weekly {d['weekly_used_pct']}%")
+        return d
 
     # ── cookie-based API fetcher ────────────────
 
@@ -685,12 +840,14 @@ class ClaudeDataFetcher:
 
         # plan name: prefer org data, then local hint
         plan_found = False
-        for key in ("rate_limit_tier", "plan", "billing_type"):
+        for key in ("rate_limit_tier", "plan"):
             v = org.get(key)
             if v:
-                d["plan"] = str(v).replace("_", " ").replace("default claude ", "").title()
-                plan_found = True
-                break
+                resolved = self._resolve_plan_name(str(v))
+                if resolved:
+                    d["plan"] = resolved
+                    plan_found = True
+                    break
         if not plan_found and plan_hint:
             d["plan"] = plan_hint
 
@@ -732,13 +889,38 @@ class ClaudeDataFetcher:
                     pass
             return None
 
-        # The API may return:
+        # The API may return (claude.ai web API / Anthropic OAuth API):
+        #   {"five_hour": {"utilization": N, "resets_at": "..."}, "seven_day": {...}}
+        # Or legacy formats:
         #   {"daily_usage": {...}, "monthly_usage": {...}}
         #   {"session_limit": {...}, "weekly_limit": {...}}
         #   {"messageLimit": {"remaining": N, ...}}
         #   or a flat dict with percentage fields
 
-        # try nested blobs first
+        # ── try five_hour / seven_day format first (actual Claude API format) ──
+        five_hour = usage.get("five_hour")
+        seven_day = usage.get("seven_day")
+        if isinstance(five_hour, dict) and "utilization" in five_hour:
+            util = five_hour["utilization"]
+            if util is not None:
+                d["session_used_pct"] = max(0, min(100, int(util)))
+            sr = reset_from(five_hour)
+            if sr:
+                d["session_reset"] = sr
+        if isinstance(seven_day, dict) and "utilization" in seven_day:
+            util = seven_day["utilization"]
+            if util is not None:
+                d["weekly_used_pct"] = max(0, min(100, int(util)))
+            wr = reset_from(seven_day)
+            if wr:
+                d["weekly_reset"] = wr
+
+        # If five_hour/seven_day worked, we're done with usage parsing
+        if five_hour or seven_day:
+            print(f"    API usage keys: {list(usage.keys())}")
+            return d
+
+        # ── fallback: try legacy nested blobs ──
         session_blob = (usage.get("daily_usage")
                         or usage.get("session_limit")
                         or usage.get("session")
@@ -1137,7 +1319,7 @@ class CodexBarPopup(ctk.CTkToplevel):
     WIDTH = 370
     FINAL_ALPHA = 0.94
 
-    # ── Claude palette ──
+    # ── Claude palette (light) ──
     CL_BG       = "#FFFFFF"
     CL_SURFACE  = "#FAF9F7"
     CL_PRIMARY  = "#191918"
@@ -1150,6 +1332,24 @@ class CodexBarPopup(ctk.CTkToplevel):
     CL_TRACK    = "#F0EFED"
     CL_DIVIDER  = "#ECEAE6"
     CL_HOVER    = "#F5F3EF"
+
+    # ── Claude palette (dark) ──
+    CL_DK_BG       = "#1C1C1E"
+    CL_DK_SURFACE  = "#2A2A2C"
+    CL_DK_PRIMARY  = "#EAEAEA"
+    CL_DK_SECOND   = "#A0A0A6"
+    CL_DK_TERTIARY = "#6E6E76"
+    CL_DK_ACCENT   = "#E08A6D"
+    CL_DK_LITE     = "#3A2A24"
+    CL_DK_BADGE_FG = "#E8A48E"
+    CL_DK_BADGE_BG = "#3A2820"
+    CL_DK_TRACK    = "#333335"
+    CL_DK_DIVIDER  = "#2E2E30"
+    CL_DK_HOVER    = "#2E2E30"
+    CL_DK_GRAD     = [
+        ("#2E2220", 4), ("#2A201E", 3), ("#281E1C", 3),
+        ("#261D1B", 3), ("#241C1A", 2), ("#221B19", 2),
+    ]
 
     # ── OpenAI palette ──
     OA_BG       = "#212121"
@@ -1164,6 +1364,27 @@ class CodexBarPopup(ctk.CTkToplevel):
     OA_HOVER    = "#333333"
     OA_CARD     = "#2F2F2F"
 
+    # ── config persistence ──
+    _CFG_DIR  = Path.home() / ".codexbar"
+    _CFG_FILE = _CFG_DIR / "config.json"
+
+    @classmethod
+    def _load_prefs(cls):
+        try:
+            with open(cls._CFG_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    @classmethod
+    def _save_prefs(cls, prefs):
+        try:
+            cls._CFG_DIR.mkdir(parents=True, exist_ok=True)
+            with open(cls._CFG_FILE, "w") as f:
+                json.dump(prefs, f)
+        except Exception:
+            pass
+
     def __init__(self, master, claude_data, codex_data=None, *,
                  on_close=None, on_refresh=None, on_quit=None,
                  on_tab_switch=None):
@@ -1176,8 +1397,15 @@ class CodexBarPopup(ctk.CTkToplevel):
         self._on_tab_switch = on_tab_switch
         self._active_tab = "claude"
 
+        # load persisted preferences
+        prefs = self._load_prefs()
+        self._pinned = prefs.get("pinned", False)
+        self._dark_mode = prefs.get("dark_mode", False)
+        self._compact = prefs.get("compact", False)
+
         self.overrideredirect(True)
-        self.configure(fg_color=self.CL_BG)
+        bg = self.CL_DK_BG if self._dark_mode else self.CL_BG
+        self.configure(fg_color=bg)
         self.attributes("-topmost", True)
         self.attributes("-alpha", 0.0)
 
@@ -1198,8 +1426,10 @@ class CodexBarPopup(ctk.CTkToplevel):
         work = self._work_area()
         w = self.WIDTH
         tab_h = self._tab_bar.winfo_reqheight()
-        foot_h = self._footer_frame.winfo_reqheight()
-        h = tab_h + self._fixed_panel_h + foot_h
+        foot_h = self._footer_frame.winfo_reqheight() if not self._compact else 0
+        panel_h = self._claude_frame.winfo_reqheight() if self._compact \
+                  else self._fixed_panel_h
+        h = tab_h + panel_h + foot_h
         self._target_x = max(work[2] + 8, work[0] - w - 12)
         self._target_y = max(work[3] + 8, work[1] - h - 12)
         self.geometry(f"{w}x{h}+{self._target_x}+{self._target_y + 14}")
@@ -1207,6 +1437,10 @@ class CodexBarPopup(ctk.CTkToplevel):
         self.after(30, self._apply_dwm)
         self.bind("<Escape>", lambda e: self._close())
         self.bind("<FocusOut>", self._on_focus_out)
+        self._drag_x = 0
+        self._drag_y = 0
+        self._tab_bar.bind("<ButtonPress-1>", self._drag_start)
+        self._tab_bar.bind("<B1-Motion>", self._drag_move)
         self.focus_force()
         self.after(40, self._animate_in, 0)
 
@@ -1260,12 +1494,118 @@ class CodexBarPopup(ctk.CTkToplevel):
         except Exception:
             pass
 
+    # ── drag to reposition ──
+
+    def _drag_start(self, event):
+        self._drag_x = event.x
+        self._drag_y = event.y
+
+    def _drag_move(self, event):
+        x = self.winfo_x() + (event.x - self._drag_x)
+        y = self.winfo_y() + (event.y - self._drag_y)
+        self._target_x = x
+        self._target_y = y
+        self.geometry(f"+{x}+{y}")
+
+    # ── Claude color helpers (dark mode aware) ──
+
+    def _cl(self, attr):
+        """Return the current Claude color for a given attribute name.
+        e.g. _cl('BG') returns CL_DK_BG in dark mode, CL_BG in light."""
+        if self._dark_mode:
+            return getattr(self, f"CL_DK_{attr}", getattr(self, f"CL_{attr}"))
+        return getattr(self, f"CL_{attr}")
+
+    # ── pin / dark mode toggles ──
+
+    def _toggle_pin(self):
+        self._pinned = not self._pinned
+        self._pin_btn.configure(
+            text="\U0001F4CC" if self._pinned else "\U0001F4CB",
+            fg_color=self._cl("TRACK") if self._pinned else "transparent")
+        prefs = self._load_prefs()
+        prefs["pinned"] = self._pinned
+        self._save_prefs(prefs)
+
+    def _toggle_dark_mode(self):
+        self._dark_mode = not self._dark_mode
+        self._dark_btn.configure(
+            text="\u2600" if self._dark_mode else "\u263E")
+        prefs = self._load_prefs()
+        prefs["dark_mode"] = self._dark_mode
+        self._save_prefs(prefs)
+        # re-apply colors if on the Claude tab
+        if self._active_tab == "claude":
+            self._apply_claude_theme()
+            self._resize_to_fit()
+
+    def _toggle_compact(self):
+        self._compact = not self._compact
+        self._compact_btn.configure(
+            text="\u2913" if self._compact else "\u2912")
+        prefs = self._load_prefs()
+        prefs["compact"] = self._compact
+        self._save_prefs(prefs)
+        if self._active_tab == "claude":
+            # rebuild panel with compact layout
+            for w in self._claude_frame.winfo_children():
+                w.destroy()
+            self._build_claude_panel(self._claude_frame)
+        # show/hide footer
+        if self._compact:
+            self._footer_frame.pack_forget()
+        else:
+            self._footer_frame.pack(fill="x", side="bottom")
+        self._resize_to_fit()
+
+    def _resize_to_fit(self):
+        """Resize the popup to fit current content."""
+        self.update_idletasks()
+        tab_h = self._tab_bar.winfo_reqheight()
+        panel_h = self._claude_frame.winfo_reqheight() if self._active_tab == "claude" \
+                  else self._openai_frame.winfo_reqheight()
+        foot_h = self._footer_frame.winfo_reqheight() if not self._compact else 0
+        h = tab_h + panel_h + foot_h
+        self.geometry(f"{self.WIDTH}x{h}+{self._target_x}+{self._target_y}")
+
+    def _apply_claude_theme(self):
+        """Re-color the chrome (tab bar, footer, controls) for Claude tab."""
+        bg = self._cl("BG")
+        track = self._cl("TRACK")
+        lite = self._cl("LITE")
+        hover = self._cl("HOVER")
+        accent = self._cl("ACCENT")
+        tertiary = self._cl("TERTIARY")
+        divider = self._cl("DIVIDER")
+
+        self._tab_bar.configure(fg_color=bg)
+        self._tab_inner.configure(fg_color=track)
+        self._cl_tab_btn.configure(fg_color=lite, hover_color=lite)
+        self._oa_tab_btn.configure(fg_color="transparent", hover_color=hover)
+        self.configure(fg_color=bg)
+        self._footer_frame.configure(fg_color=bg)
+        self._footer_divider.configure(fg_color=divider)
+        self._dash_btn.configure(text_color=accent, hover_color=hover)
+        self._quit_btn.configure(text_color=tertiary, hover_color=hover)
+        self._refresh_btn.configure(fg_color=accent, hover_color="#C4654A")
+        self._pin_btn.configure(hover_color=hover)
+        self._dark_btn.configure(hover_color=hover)
+
+        # rebuild Claude panel content with new colors
+        for w in self._claude_frame.winfo_children():
+            w.destroy()
+        self._build_claude_panel(self._claude_frame)
+
     # ── focus ──
 
     def _on_focus_out(self, event):
+        if self._pinned:
+            return
         self.after(120, self._check_focus)
 
     def _check_focus(self):
+        if self._pinned:
+            return
         try:
             fw = self.focus_get()
             if fw is not None and str(fw).startswith(str(self)):
@@ -1297,16 +1637,7 @@ class CodexBarPopup(ctk.CTkToplevel):
 
         # tab button + footer styles
         if tab == "claude":
-            self._tab_bar.configure(fg_color=self.CL_BG)
-            self._tab_inner.configure(fg_color=self.CL_TRACK)
-            self._cl_tab_btn.configure(fg_color=self.CL_LITE, hover_color=self.CL_LITE)
-            self._oa_tab_btn.configure(fg_color="transparent", hover_color=self.CL_HOVER)
-            self.configure(fg_color=self.CL_BG)
-            self._footer_frame.configure(fg_color=self.CL_BG)
-            self._footer_divider.configure(fg_color=self.CL_DIVIDER)
-            self._dash_btn.configure(text_color=self.CL_ACCENT, hover_color=self.CL_HOVER)
-            self._quit_btn.configure(text_color=self.CL_TERTIARY, hover_color=self.CL_HOVER)
-            self._refresh_btn.configure(fg_color=self.CL_ACCENT, hover_color="#C4654A")
+            self._apply_claude_theme()
         else:
             self._tab_bar.configure(fg_color=self.OA_BG)
             self._tab_inner.configure(fg_color=self.OA_TRACK)
@@ -1318,6 +1649,8 @@ class CodexBarPopup(ctk.CTkToplevel):
             self._dash_btn.configure(text_color=self.OA_GREEN, hover_color=self.OA_HOVER)
             self._quit_btn.configure(text_color=self.OA_TERTIARY, hover_color=self.OA_HOVER)
             self._refresh_btn.configure(fg_color=self.OA_GREEN, hover_color="#0D8A6A")
+            self._pin_btn.configure(hover_color=self.OA_HOVER)
+            self._dark_btn.configure(hover_color=self.OA_HOVER)
 
         # swap frames
         self._claude_frame.pack_forget()
@@ -1402,13 +1735,18 @@ class CodexBarPopup(ctk.CTkToplevel):
     # ═══════════════════════════════════════
 
     def _build_ui(self):
-        # ── TAB BAR — tiny icon pills, top-left ──
-        tab_bar = ctk.CTkFrame(self, fg_color=self.CL_BG, corner_radius=0, height=34)
+        bg = self._cl("BG")
+        track = self._cl("TRACK")
+        hover = self._cl("HOVER")
+        lite = self._cl("LITE")
+
+        # ── TAB BAR — tiny icon pills, top-left + controls top-right ──
+        tab_bar = ctk.CTkFrame(self, fg_color=bg, corner_radius=0, height=34)
         tab_bar.pack(fill="x")
         tab_bar.pack_propagate(False)
         self._tab_bar = tab_bar
 
-        self._tab_inner = ctk.CTkFrame(tab_bar, fg_color=self.CL_TRACK, corner_radius=9)
+        self._tab_inner = ctk.CTkFrame(tab_bar, fg_color=track, corner_radius=9)
         self._tab_inner.pack(side="left", padx=14, pady=4)
         tab_inner = self._tab_inner
 
@@ -1417,8 +1755,8 @@ class CodexBarPopup(ctk.CTkToplevel):
             text="",
             image=self._cl_tab_icon,
             font=("Segoe UI", 1),
-            fg_color=self.CL_LITE,
-            hover_color=self.CL_LITE,
+            fg_color=lite,
+            hover_color=lite,
             corner_radius=8, height=26, width=34,
             command=lambda: self._switch_tab("claude"))
         self._cl_tab_btn.pack(side="left", padx=(2, 1), pady=2)
@@ -1429,13 +1767,46 @@ class CodexBarPopup(ctk.CTkToplevel):
             image=self._oa_tab_icon,
             font=("Segoe UI", 1),
             fg_color="transparent",
-            hover_color=self.CL_HOVER,
+            hover_color=hover,
             corner_radius=8, height=26, width=34,
             command=lambda: self._switch_tab("openai"))
         self._oa_tab_btn.pack(side="left", padx=(1, 2), pady=2)
 
+        # ── PIN + DARK MODE buttons (top-right) ──
+        ctrl_frame = ctk.CTkFrame(tab_bar, fg_color="transparent")
+        ctrl_frame.pack(side="right", padx=10, pady=4)
+
+        ctrl_text = self._cl("SECOND")
+        pin_label = "\U0001F4CC" if self._pinned else "\U0001F4CB"  # 📌 / 📋
+        self._pin_btn = ctk.CTkButton(
+            ctrl_frame, text=pin_label, font=("Segoe UI", 13),
+            text_color=ctrl_text,
+            fg_color=self._cl("TRACK") if self._pinned else "transparent",
+            hover_color=hover,
+            corner_radius=8, height=26, width=28,
+            command=self._toggle_pin)
+        self._pin_btn.pack(side="left", padx=1)
+
+        dark_label = "\u2600" if self._dark_mode else "\u263E"  # ☀ / ☾
+        self._dark_btn = ctk.CTkButton(
+            ctrl_frame, text=dark_label, font=("Segoe UI", 14),
+            text_color=ctrl_text,
+            fg_color="transparent", hover_color=hover,
+            corner_radius=8, height=26, width=28,
+            command=self._toggle_dark_mode)
+        self._dark_btn.pack(side="left", padx=1)
+
+        compact_label = "\u2913" if self._compact else "\u2912"  # ⤓ expand / ⤒ compact
+        self._compact_btn = ctk.CTkButton(
+            ctrl_frame, text=compact_label, font=("Segoe UI", 14),
+            text_color=ctrl_text,
+            fg_color="transparent", hover_color=hover,
+            corner_radius=8, height=26, width=28,
+            command=self._toggle_compact)
+        self._compact_btn.pack(side="left", padx=1)
+
         # ── CLAUDE CONTENT ──
-        self._claude_frame = ctk.CTkFrame(self, fg_color=self.CL_BG, corner_radius=0)
+        self._claude_frame = ctk.CTkFrame(self, fg_color=self._cl("BG"), corner_radius=0)
         self._build_claude_panel(self._claude_frame)
         self._claude_frame.pack(fill="both", expand=True)
 
@@ -1455,10 +1826,11 @@ class CodexBarPopup(ctk.CTkToplevel):
         # store the fixed popup height (tab_bar + max_panel + footer)
         self._fixed_panel_h = max(ch, oh)
 
-        # ── FOOTER (always visible, bottom) ──
+        # ── FOOTER (hidden in compact mode) ──
         self._footer_frame = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
         self._build_footer(self._footer_frame)
-        self._footer_frame.pack(fill="x", side="bottom")
+        if not self._compact:
+            self._footer_frame.pack(fill="x", side="bottom")
 
     # ═══════════════════════════════════════
     # CLAUDE PANEL
@@ -1472,13 +1844,23 @@ class CodexBarPopup(ctk.CTkToplevel):
         has_data = d["source"] != "none"
         has_cost = d["cost_today"] > 0 or d["cost_30d"] > 0
 
+        parent.configure(fg_color=self._cl("BG"))
+
+        if self._compact:
+            return self._build_claude_compact(parent, d, sp, wp)
+
         # warm gradient flare
-        for color, h in [
-            ("#FCEEE8", 4), ("#FDF1EC", 3), ("#FDF4F0", 3),
-            ("#FEF6F3", 3), ("#FEF8F6", 2), ("#FFFCFB", 2),
-        ]:
-            ctk.CTkFrame(parent, fg_color=color, height=h,
-                         corner_radius=0).pack(fill="x")
+        if self._dark_mode:
+            for color, h in self.CL_DK_GRAD:
+                ctk.CTkFrame(parent, fg_color=color, height=h,
+                             corner_radius=0).pack(fill="x")
+        else:
+            for color, h in [
+                ("#FCEEE8", 4), ("#FDF1EC", 3), ("#FDF4F0", 3),
+                ("#FEF6F3", 3), ("#FEF8F6", 2), ("#FFFCFB", 2),
+            ]:
+                ctk.CTkFrame(parent, fg_color=color, height=h,
+                             corner_radius=0).pack(fill="x")
 
         # header
         hero = ctk.CTkFrame(parent, fg_color="transparent")
@@ -1490,9 +1872,9 @@ class CodexBarPopup(ctk.CTkToplevel):
             ctk.CTkLabel(row, text="", image=self._cl_logo_big,
                          width=32, height=32).pack(side="left", padx=(0, 10))
         ctk.CTkLabel(row, text="Claude", font=("Segoe UI Semibold", 22),
-                     text_color=self.CL_PRIMARY).pack(side="left")
+                     text_color=self._cl("PRIMARY")).pack(side="left")
         ctk.CTkLabel(row, text=f"  {d['plan']}  ", font=("Segoe UI Semibold", 11),
-                     text_color=self.CL_BADGE_FG, fg_color=self.CL_BADGE_BG,
+                     text_color=self._cl("BADGE_FG"), fg_color=self._cl("BADGE_BG"),
                      corner_radius=10).pack(side="right")
 
         meta = ctk.CTkFrame(hero, fg_color="transparent")
@@ -1500,15 +1882,15 @@ class CodexBarPopup(ctk.CTkToplevel):
         ctk.CTkFrame(meta, fg_color="#5CB176", corner_radius=4,
                      width=7, height=7).pack(side="left", padx=(1, 7), pady=5)
         ctk.CTkLabel(meta, text=d["updated"], font=("Segoe UI", 12),
-                     text_color=self.CL_SECOND).pack(side="left")
+                     text_color=self._cl("SECOND")).pack(side="left")
         ctk.CTkLabel(meta, text=f"  {d['source']}", font=("Segoe UI", 11),
-                     text_color=self.CL_TERTIARY).pack(side="left")
+                     text_color=self._cl("TERTIARY")).pack(side="left")
 
         if has_data:
-            ctk.CTkFrame(parent, fg_color=self.CL_DIVIDER,
+            ctk.CTkFrame(parent, fg_color=self._cl("DIVIDER"),
                          height=1, corner_radius=0).pack(fill="x", padx=20, pady=(12, 0))
             ctk.CTkLabel(parent, text="Usage", font=("Segoe UI Semibold", 13),
-                         text_color=self.CL_TERTIARY,
+                         text_color=self._cl("TERTIARY"),
                          anchor="w").pack(fill="x", padx=22, pady=(10, 2))
             self._cl_usage_bar(parent, "Session", sp, d["session_reset"])
             self._cl_usage_bar(parent, "Weekly", wp, d["weekly_reset"])
@@ -1516,17 +1898,17 @@ class CodexBarPopup(ctk.CTkToplevel):
                 self._cl_usage_bar(parent, "Opus", op)
 
         if has_cost:
-            ctk.CTkFrame(parent, fg_color=self.CL_DIVIDER,
+            ctk.CTkFrame(parent, fg_color=self._cl("DIVIDER"),
                          height=1, corner_radius=0).pack(fill="x", padx=20, pady=(8, 0))
             ctk.CTkLabel(parent, text="API Cost Estimate",
                          font=("Segoe UI Semibold", 13),
-                         text_color=self.CL_TERTIARY,
+                         text_color=self._cl("TERTIARY"),
                          anchor="w").pack(fill="x", padx=22, pady=(10, 0))
             ctk.CTkLabel(parent, text="Estimated API equivalent — not billed",
                          font=("Segoe UI", 10),
-                         text_color=self.CL_TERTIARY,
+                         text_color=self._cl("TERTIARY"),
                          anchor="w").pack(fill="x", padx=22, pady=(0, 4))
-            card = ctk.CTkFrame(parent, fg_color=self.CL_SURFACE, corner_radius=10)
+            card = ctk.CTkFrame(parent, fg_color=self._cl("SURFACE"), corner_radius=10)
             card.pack(fill="x", padx=20, pady=(0, 2))
             inner = ctk.CTkFrame(card, fg_color="transparent")
             inner.pack(fill="x", padx=14, pady=10)
@@ -1535,24 +1917,24 @@ class CodexBarPopup(ctk.CTkToplevel):
                 r = ctk.CTkFrame(inner, fg_color="transparent")
                 r.pack(fill="x", pady=1)
                 ctk.CTkLabel(r, text=label, font=("Segoe UI", 12),
-                             text_color=self.CL_SECOND).pack(side="left")
+                             text_color=self._cl("SECOND")).pack(side="left")
                 ctk.CTkLabel(r, text=val, font=("Segoe UI Semibold", 13),
-                             text_color=self.CL_PRIMARY).pack(side="right")
+                             text_color=self._cl("PRIMARY")).pack(side="right")
 
         if not d.get("installed", True) and not has_data and not has_cost:
-            ctk.CTkFrame(parent, fg_color=self.CL_DIVIDER,
+            ctk.CTkFrame(parent, fg_color=self._cl("DIVIDER"),
                          height=1, corner_radius=0).pack(fill="x", padx=20, pady=(12, 0))
             nd = ctk.CTkFrame(parent, fg_color="transparent")
             nd.pack(fill="x", padx=20, pady=(20, 8))
             ctk.CTkLabel(nd, text="Claude Code not detected",
                          font=("Segoe UI Semibold", 14),
-                         text_color=self.CL_PRIMARY).pack(pady=(0, 4))
+                         text_color=self._cl("PRIMARY")).pack(pady=(0, 4))
             ctk.CTkLabel(nd, text="Install the CLI to see your usage",
                          font=("Segoe UI", 11),
-                         text_color=self.CL_SECOND).pack(pady=(0, 12))
+                         text_color=self._cl("SECOND")).pack(pady=(0, 12))
             ctk.CTkButton(nd, text="Install Claude Code",
                           font=("Segoe UI Semibold", 13),
-                          text_color="#FFFFFF", fg_color=self.CL_ACCENT,
+                          text_color="#FFFFFF", fg_color=self._cl("ACCENT"),
                           hover_color="#C4654A", corner_radius=10,
                           height=38, width=200,
                           command=lambda: self._open_url(
@@ -1562,12 +1944,52 @@ class CodexBarPopup(ctk.CTkToplevel):
             nd = ctk.CTkFrame(parent, fg_color="transparent")
             nd.pack(fill="x", padx=20, pady=24)
             ctk.CTkLabel(nd, text="No session data yet", font=("Segoe UI", 13),
-                         text_color=self.CL_SECOND).pack()
+                         text_color=self._cl("SECOND")).pack()
             ctk.CTkLabel(nd, text="Run /usage in Claude Code",
                          font=("Segoe UI", 11),
-                         text_color=self.CL_TERTIARY).pack(pady=(4, 0))
+                         text_color=self._cl("TERTIARY")).pack(pady=(4, 0))
 
         ctk.CTkFrame(parent, fg_color="transparent", height=6).pack(fill="x")
+
+    def _build_claude_compact(self, parent, d, sp, wp):
+        """Minimal layout: just plan badge + two usage bars, tight spacing."""
+        # thin header row: plan badge + update time
+        hdr = ctk.CTkFrame(parent, fg_color="transparent")
+        hdr.pack(fill="x", padx=14, pady=(16, 4))
+        ctk.CTkLabel(hdr, text=f"  {d['plan']}  ", font=("Segoe UI Semibold", 11),
+                     text_color=self._cl("PRIMARY"), fg_color=self._cl("TRACK"),
+                     corner_radius=8).pack(side="left")
+        ctk.CTkFrame(hdr, fg_color="#5CB176", corner_radius=3,
+                     width=6, height=6).pack(side="left", padx=(8, 4), pady=4)
+        ctk.CTkLabel(hdr, text=d["updated"], font=("Segoe UI Semibold", 11),
+                     text_color=self._cl("SECOND")).pack(side="left")
+
+        # compact usage bars — no "Usage" header, tight spacing
+        self._cl_usage_bar_compact(parent, "Session", sp, d["session_reset"])
+        self._cl_usage_bar_compact(parent, "Weekly", wp, d["weekly_reset"])
+        ctk.CTkFrame(parent, fg_color="transparent", height=10).pack(fill="x")
+
+    def _cl_usage_bar_compact(self, parent, label, pct, reset=None):
+        """Tight usage bar for compact mode."""
+        color = self._cl_bar_color(pct)
+        sec = ctk.CTkFrame(parent, fg_color="transparent")
+        sec.pack(fill="x", padx=14, pady=(2, 0))
+        row = ctk.CTkFrame(sec, fg_color="transparent")
+        row.pack(fill="x")
+        ctk.CTkLabel(row, text=label, font=("Segoe UI Semibold", 11),
+                     text_color=self._cl("PRIMARY")).pack(side="left")
+        right = ctk.CTkFrame(row, fg_color="transparent")
+        right.pack(side="right")
+        if reset and reset != "unknown":
+            ctk.CTkLabel(right, text=reset, font=("Segoe UI", 10),
+                         text_color=self._cl("TERTIARY")).pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(right, text=f"{pct}%", font=("Segoe UI Semibold", 11),
+                     text_color=color).pack(side="left")
+        track = ctk.CTkFrame(sec, fg_color=self._cl("TRACK"), height=6, corner_radius=3)
+        track.pack(fill="x", pady=(2, 0))
+        track.pack_propagate(False)
+        ctk.CTkFrame(track, fg_color=color, corner_radius=3, height=6).place(
+            relx=0, rely=0, relwidth=max(pct / 100, 0.015), relheight=1)
 
     def _cl_usage_bar(self, parent, label, pct, reset=None):
         color = self._cl_bar_color(pct)
@@ -1576,17 +1998,17 @@ class CodexBarPopup(ctk.CTkToplevel):
         row = ctk.CTkFrame(sec, fg_color="transparent")
         row.pack(fill="x")
         ctk.CTkLabel(row, text=label, font=("Segoe UI Semibold", 13),
-                     text_color=self.CL_PRIMARY).pack(side="left")
+                     text_color=self._cl("PRIMARY")).pack(side="left")
         ctk.CTkLabel(row, text=f"{pct}%", font=("Segoe UI Semibold", 13),
                      text_color=color).pack(side="right")
-        track = ctk.CTkFrame(sec, fg_color=self.CL_TRACK, height=8, corner_radius=4)
+        track = ctk.CTkFrame(sec, fg_color=self._cl("TRACK"), height=8, corner_radius=4)
         track.pack(fill="x", pady=(4, 3))
         track.pack_propagate(False)
         ctk.CTkFrame(track, fg_color=color, corner_radius=4, height=8).place(
             relx=0, rely=0, relwidth=max(pct / 100, 0.015), relheight=1)
         if reset and reset != "unknown":
             ctk.CTkLabel(sec, text=f"Resets {reset}", font=("Segoe UI", 11),
-                         text_color=self.CL_TERTIARY, anchor="w").pack(fill="x")
+                         text_color=self._cl("TERTIARY"), anchor="w").pack(fill="x")
 
     # ═══════════════════════════════════════
     # OPENAI PANEL — mirrors Claude layout
@@ -1728,7 +2150,7 @@ class CodexBarPopup(ctk.CTkToplevel):
     # ═══════════════════════════════════════
 
     def _build_footer(self, parent):
-        self._footer_divider = ctk.CTkFrame(parent, fg_color=self.CL_DIVIDER,
+        self._footer_divider = ctk.CTkFrame(parent, fg_color=self._cl("DIVIDER"),
                      height=1, corner_radius=0)
         self._footer_divider.pack(fill="x", padx=20)
 
@@ -1737,8 +2159,8 @@ class CodexBarPopup(ctk.CTkToplevel):
 
         self._dash_btn = ctk.CTkButton(
             row, text="Dashboard", font=("Segoe UI", 12),
-            text_color=self.CL_ACCENT, fg_color="transparent",
-            hover_color=self.CL_HOVER, anchor="w", height=30,
+            text_color=self._cl("ACCENT"), fg_color="transparent",
+            hover_color=self._cl("HOVER"), anchor="w", height=30,
             corner_radius=8, width=80,
             command=lambda: self._open_url(
                 "https://platform.openai.com/usage" if self._active_tab == "openai"
@@ -1747,14 +2169,14 @@ class CodexBarPopup(ctk.CTkToplevel):
 
         self._quit_btn = ctk.CTkButton(
             row, text="Quit", font=("Segoe UI", 12),
-            text_color=self.CL_TERTIARY, fg_color="transparent",
-            hover_color=self.CL_HOVER, anchor="center", height=30,
+            text_color=self._cl("TERTIARY"), fg_color="transparent",
+            hover_color=self._cl("HOVER"), anchor="center", height=30,
             corner_radius=8, width=50, command=self._do_quit)
         self._quit_btn.pack(side="right", padx=2)
 
         self._refresh_btn = ctk.CTkButton(
             row, text="Refresh", font=("Segoe UI Semibold", 12),
-            text_color="#FFFFFF", fg_color=self.CL_ACCENT,
+            text_color="#FFFFFF", fg_color=self._cl("ACCENT"),
             hover_color="#C4654A", anchor="center", height=30,
             corner_radius=8, width=70, command=self._do_refresh)
         self._refresh_btn.pack(side="right", padx=2)
