@@ -392,7 +392,12 @@ class ClaudeDataFetcher:
             else:
                 print("  -- Cookie: not available")
 
-        # 4) Always try JSONL for cost data
+        # 4) Enrich plan name from OAuth account API if plan is generic
+        #    (CLI only reports "Max"/"Pro", not "Max 20x" etc.)
+        if self.data.get("plan") in ("Max", "Unknown", ""):
+            self._enrich_plan_from_account()
+
+        # 5) Always try JSONL for cost data
         cost = self._fetch_jsonl()
         if cost:
             self.data["cost_today"] = cost["cost_today"]
@@ -577,6 +582,68 @@ class ClaudeDataFetcher:
 
     _CREDS_PATH = Path.home() / ".claude" / ".credentials.json"
 
+    @staticmethod
+    def _resolve_plan_name(tier_str):
+        """Resolve a rateLimitTier string to a clean plan name.
+
+        Examples:
+            "default_claude_max_5x"  -> "Max 5x"
+            "default_claude_max_20x" -> "Max 20x"
+            "default_claude_max"     -> "Max"
+            "default_claude_pro"     -> "Pro"
+            "claude_team"            -> "Team"
+            "default_claude"         -> "Pro"  (fallback)
+        """
+        lo = (tier_str or "").lower()
+        if "max" in lo:
+            # extract multiplier if present (e.g. "5x", "20x")
+            m = re.search(r'(\d+x)', lo)
+            return f"Max {m.group(1)}" if m else "Max"
+        if "enterprise" in lo:
+            return "Enterprise"
+        if "team" in lo:
+            return "Team"
+        if "pro" in lo:
+            return "Pro"
+        if "free" in lo:
+            return "Free"
+        if "ultra" in lo:
+            return "Ultra"
+        if "claude" in lo:
+            return "Pro"  # default_claude with stripe billing = Pro
+        return ""
+
+    def _enrich_plan_from_account(self):
+        """Fetch live rate_limit_tier from /api/oauth/account to get
+        the accurate plan name with multiplier (e.g. 'Max 20x')."""
+        if not self._CREDS_PATH.exists():
+            return
+        try:
+            with open(self._CREDS_PATH, "r", encoding="utf-8") as f:
+                token = json.load(f).get("claudeAiOauth", {}).get("accessToken")
+            if not token:
+                return
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "anthropic-beta": "oauth-2025-04-20",
+                "User-Agent": "claude-code/1.0",
+                "Accept": "application/json",
+            }
+            req = Request("https://api.anthropic.com/api/oauth/account",
+                          headers=headers)
+            with urlopen(req, timeout=10) as resp:
+                acct = json.loads(resp.read())
+            for mem in acct.get("memberships") or []:
+                tier = (mem.get("organization") or {}).get("rate_limit_tier", "")
+                if tier:
+                    resolved = self._resolve_plan_name(tier)
+                    if resolved:
+                        self.data["plan"] = resolved
+                        print(f"    Plan enriched: {tier} -> {resolved}")
+                    break
+        except Exception as e:
+            print(f"    Plan enrich err (non-fatal): {e}")
+
     def _fetch_oauth_api(self):
         """Read the OAuth access token that Claude Code stores locally,
         then call the Claude.ai API to get live usage data."""
@@ -592,13 +659,19 @@ class ClaudeDataFetcher:
 
             # pre-fill plan from local credentials (no network needed)
             tier = oauth.get("rateLimitTier") or oauth.get("subscriptionType") or ""
-            plan_local = tier.replace("default_claude_", "").replace("_", " ").title() or "Pro"
+            plan_local = self._resolve_plan_name(tier) or "Pro"
 
             print(f"    OAuth token found ({len(token)} chars), plan hint: {plan_local}")
         except Exception as e:
             print(f"    OAuth creds err: {e}")
             return None
 
+        # Try the direct Anthropic OAuth usage endpoint first (more reliable)
+        result = self._fetch_oauth_direct(token, plan_local)
+        if result:
+            return result
+
+        # Fall back to claude.ai web API
         result = self._call_claude_api(
             auth_header=("Authorization", f"Bearer {token}"),
             plan_hint=plan_local,
@@ -608,6 +681,88 @@ class ClaudeDataFetcher:
         if result is None and plan_local:
             self.data["plan"] = plan_local
         return result
+
+    def _fetch_oauth_direct(self, token, plan_hint):
+        """Call the Anthropic OAuth endpoints directly.
+
+        Uses the same endpoints as the upstream macOS CodexBar:
+        - GET /api/oauth/account  → live rate_limit_tier (plan name)
+        - GET /api/oauth/usage    → utilization percentages + reset times
+        """
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "User-Agent": "claude-code/1.0",
+            "Accept": "application/json",
+        }
+
+        d = self._empty()
+        d["source"] = "api"
+        d["plan"] = plan_hint or "Pro"
+
+        # ── step 1: get live plan from /account ──
+        try:
+            req = Request("https://api.anthropic.com/api/oauth/account",
+                          headers=headers)
+            with urlopen(req, timeout=15) as resp:
+                acct = json.loads(resp.read())
+            memberships = acct.get("memberships") or []
+            for mem in memberships:
+                org = mem.get("organization") or {}
+                tier = org.get("rate_limit_tier") or ""
+                if tier:
+                    resolved = self._resolve_plan_name(tier)
+                    if resolved:
+                        d["plan"] = resolved
+                        print(f"    OAuth account tier: {tier} -> {resolved}")
+                    break
+        except (URLError, HTTPError, json.JSONDecodeError) as e:
+            print(f"    OAuth /account err (non-fatal): {e}")
+
+        # ── step 2: get usage from /usage ──
+        try:
+            req = Request("https://api.anthropic.com/api/oauth/usage",
+                          headers=headers)
+            with urlopen(req, timeout=15) as resp:
+                usage = json.loads(resp.read())
+        except (URLError, HTTPError, json.JSONDecodeError) as e:
+            print(f"    OAuth direct /usage err: {e}")
+            return None
+
+        print(f"    OAuth direct usage keys: {list(usage.keys())}")
+
+        # Parse five_hour (session) and seven_day (weekly) windows
+        # Shape: {"utilization": <number>, "resets_at": "<ISO8601>"}
+        five_hour = usage.get("five_hour") or {}
+        seven_day = usage.get("seven_day") or {}
+
+        util_5h = five_hour.get("utilization")
+        if util_5h is not None:
+            d["session_used_pct"] = max(0, min(100, int(util_5h)))
+
+        util_7d = seven_day.get("utilization")
+        if util_7d is not None:
+            d["weekly_used_pct"] = max(0, min(100, int(util_7d)))
+
+        # Parse reset times
+        for blob, key in [(five_hour, "session_reset"), (seven_day, "weekly_reset")]:
+            resets_at = blob.get("resets_at")
+            if resets_at:
+                try:
+                    dt = datetime.fromisoformat(str(resets_at).replace("Z", "+00:00"))
+                    delta = dt - datetime.now(dt.tzinfo)
+                    secs = max(0, int(delta.total_seconds()))
+                    h, m = divmod(secs // 60, 60)
+                    if h >= 24:
+                        d[key] = f"{h // 24}d {h % 24}h"
+                    else:
+                        d[key] = f"{h}h {m:02d}m"
+                except Exception:
+                    pass
+
+        print(f"    OAuth direct: session {d['session_used_pct']}%, "
+              f"weekly {d['weekly_used_pct']}%")
+        return d
 
     # ── cookie-based API fetcher ────────────────
 
@@ -685,12 +840,14 @@ class ClaudeDataFetcher:
 
         # plan name: prefer org data, then local hint
         plan_found = False
-        for key in ("rate_limit_tier", "plan", "billing_type"):
+        for key in ("rate_limit_tier", "plan"):
             v = org.get(key)
             if v:
-                d["plan"] = str(v).replace("_", " ").replace("default claude ", "").title()
-                plan_found = True
-                break
+                resolved = self._resolve_plan_name(str(v))
+                if resolved:
+                    d["plan"] = resolved
+                    plan_found = True
+                    break
         if not plan_found and plan_hint:
             d["plan"] = plan_hint
 
@@ -732,13 +889,38 @@ class ClaudeDataFetcher:
                     pass
             return None
 
-        # The API may return:
+        # The API may return (claude.ai web API / Anthropic OAuth API):
+        #   {"five_hour": {"utilization": N, "resets_at": "..."}, "seven_day": {...}}
+        # Or legacy formats:
         #   {"daily_usage": {...}, "monthly_usage": {...}}
         #   {"session_limit": {...}, "weekly_limit": {...}}
         #   {"messageLimit": {"remaining": N, ...}}
         #   or a flat dict with percentage fields
 
-        # try nested blobs first
+        # ── try five_hour / seven_day format first (actual Claude API format) ──
+        five_hour = usage.get("five_hour")
+        seven_day = usage.get("seven_day")
+        if isinstance(five_hour, dict) and "utilization" in five_hour:
+            util = five_hour["utilization"]
+            if util is not None:
+                d["session_used_pct"] = max(0, min(100, int(util)))
+            sr = reset_from(five_hour)
+            if sr:
+                d["session_reset"] = sr
+        if isinstance(seven_day, dict) and "utilization" in seven_day:
+            util = seven_day["utilization"]
+            if util is not None:
+                d["weekly_used_pct"] = max(0, min(100, int(util)))
+            wr = reset_from(seven_day)
+            if wr:
+                d["weekly_reset"] = wr
+
+        # If five_hour/seven_day worked, we're done with usage parsing
+        if five_hour or seven_day:
+            print(f"    API usage keys: {list(usage.keys())}")
+            return d
+
+        # ── fallback: try legacy nested blobs ──
         session_blob = (usage.get("daily_usage")
                         or usage.get("session_limit")
                         or usage.get("session")
