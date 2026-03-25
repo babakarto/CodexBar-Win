@@ -340,7 +340,7 @@ class ClaudeDataFetcher:
         return {
             "provider": "Claude", "plan": "Unknown", "updated": "Never",
             "session_used_pct": 0, "session_reset": "unknown",
-            "weekly_used_pct": 0, "weekly_reset": "unknown",
+            "weekly_used_pct": 0, "weekly_reset": "unknown", "weekly_resets_at_epoch": 0,
             "opus_used_pct": 0,
             "cost_today": 0.0, "cost_today_tokens": "0",
             "cost_30d": 0.0, "cost_30d_tokens": "0",
@@ -910,7 +910,7 @@ class CodexDataFetcher:
             "provider": "Codex", "plan": "Plus",
             "updated": "Never", "source": "none",
             "session_used_pct": 0, "session_reset": "unknown",
-            "weekly_used_pct": 0, "weekly_reset": "unknown",
+            "weekly_used_pct": 0, "weekly_reset": "unknown", "weekly_resets_at_epoch": 0,
             "cost_today": 0, "cost_today_tokens": "0",
             "cost_30d": 0, "cost_30d_tokens": "0",
             "model": "",
@@ -1010,6 +1010,7 @@ class CodexDataFetcher:
                 resets_at = secondary.get("resets_at")
                 if resets_at:
                     d["weekly_reset"] = self._format_reset(resets_at)
+                    d["weekly_resets_at_epoch"] = float(resets_at)
 
             plan = rl.get("plan_type", "")
             if plan:
@@ -1138,6 +1139,75 @@ class CodexDataFetcher:
             return f"{h}h {m:02d}m"
         except Exception:
             return "unknown"
+
+
+# ─────────────────────────────────────────────
+# Weekly time progress (Friday 19:00 → Friday 18:59)
+# ─────────────────────────────────────────────
+
+def claude_week_time_pct() -> tuple:
+    """Calculate how much of the Claude weekly window has elapsed.
+
+    Cycle: Friday 19:00:00 → next Friday 18:59:59 (7 days).
+    Returns (pct: int 0-100, reset_str: str like "Fri 7:00 PM").
+    Zero-cost: uses only local clock, no API calls.
+    """
+    now = datetime.now()
+    weekday = now.weekday()  # 0=Mon ... 4=Fri
+    # Find the most recent Friday 19:00
+    days_since_friday = (weekday - 4) % 7
+    last_friday = now - timedelta(days=days_since_friday)
+    cycle_start = last_friday.replace(hour=19, minute=0, second=0, microsecond=0)
+    # If we haven't reached 19:00 on this Friday yet, go back one more week
+    if now < cycle_start:
+        cycle_start -= timedelta(days=7)
+    cycle_end = cycle_start + timedelta(days=7)
+    elapsed = (now - cycle_start).total_seconds()
+    total = 7 * 24 * 3600  # exactly 7 days
+    pct = min(max(int(elapsed / total * 100), 0), 100)
+    # Format reset time
+    reset_str = cycle_end.strftime("%a %b %d, %I:%M %p")
+    return pct, reset_str
+
+
+def codex_week_time_pct(weekly_reset_str: str) -> tuple:
+    """Calculate Codex weekly time progress from the resets_at data.
+
+    Codex uses a rolling 7-day window. We derive cycle_start = resets_at - 7 days.
+    Returns (pct: int 0-100, reset_display: str).
+    Zero-cost: uses only local data, no API calls.
+    """
+    if not weekly_reset_str or weekly_reset_str == "unknown":
+        return -1, ""
+    # weekly_reset is already formatted as countdown like "2d 5h" or "5h 30m"
+    # We need the raw resets_at epoch — so we return -1 to signal "use raw data"
+    return -1, weekly_reset_str
+
+
+def codex_week_time_pct_from_epoch(resets_at_epoch: float) -> tuple:
+    """Calculate Codex weekly time progress from raw epoch timestamp.
+
+    Cycle: (resets_at - 7 days) → resets_at.
+    Returns (pct: int 0-100, reset_str: str).
+    """
+    try:
+        ts = float(resets_at_epoch)
+        if ts > 1e12:
+            ts /= 1000.0
+        cycle_end = datetime.fromtimestamp(ts)
+        cycle_start = cycle_end - timedelta(days=7)
+        now = datetime.now()
+        if now >= cycle_end:
+            return 100, cycle_end.strftime("%a %b %d, %I:%M %p")
+        if now <= cycle_start:
+            return 0, cycle_end.strftime("%a %b %d, %I:%M %p")
+        elapsed = (now - cycle_start).total_seconds()
+        total = 7 * 24 * 3600
+        pct = min(max(int(elapsed / total * 100), 0), 100)
+        reset_str = cycle_end.strftime("%a %b %d, %I:%M %p")
+        return pct, reset_str
+    except Exception:
+        return -1, ""
 
 
 # ─────────────────────────────────────────────
@@ -1519,6 +1589,10 @@ class CodexBarPopup(ctk.CTkToplevel):
             if op > 0:
                 self._cl_usage_bar(parent, "Opus", op)
 
+            # Weekly time progress (local clock, no tokens)
+            wt_pct, wt_reset = claude_week_time_pct()
+            self._cl_time_progress_bar(parent, wt_pct, wt_reset)
+
         if has_cost:
             ctk.CTkFrame(parent, fg_color=self.CL_DIVIDER,
                          height=1, corner_radius=0).pack(fill="x", padx=20, pady=(8, 0))
@@ -1566,6 +1640,13 @@ class CodexBarPopup(ctk.CTkToplevel):
                          font=("Segoe UI", 11),
                          text_color=self.CL_TERTIARY).pack(pady=(4, 0))
 
+        # Always show weekly time progress (works without API data)
+        if not has_data:
+            ctk.CTkFrame(parent, fg_color=self.CL_DIVIDER,
+                         height=1, corner_radius=0).pack(fill="x", padx=20, pady=(12, 0))
+            wt_pct, wt_reset = claude_week_time_pct()
+            self._cl_time_progress_bar(parent, wt_pct, wt_reset)
+
         ctk.CTkFrame(parent, fg_color="transparent", height=6).pack(fill="x")
 
     def _cl_usage_bar(self, parent, label, pct, reset=None):
@@ -1586,6 +1667,39 @@ class CodexBarPopup(ctk.CTkToplevel):
         if reset and reset != "unknown":
             ctk.CTkLabel(sec, text=f"Resets {reset}", font=("Segoe UI", 11),
                          text_color=self.CL_TERTIARY, anchor="w").pack(fill="x")
+
+    def _cl_time_progress_bar(self, parent, pct, reset_str):
+        """Render the weekly time-progress bar (clock-based, no tokens)."""
+        # Subtle divider before
+        ctk.CTkFrame(parent, fg_color=self.CL_DIVIDER,
+                     height=1, corner_radius=0).pack(fill="x", padx=20, pady=(10, 0))
+        ctk.CTkLabel(parent, text="Week Progress", font=("Segoe UI Semibold", 13),
+                     text_color=self.CL_TERTIARY,
+                     anchor="w").pack(fill="x", padx=22, pady=(8, 2))
+
+        # Color: use a calm blue gradient instead of usage colors
+        if pct < 50:
+            color = "#5B9BD5"  # calm blue
+        elif pct < 80:
+            color = "#4A8BC2"  # medium blue
+        else:
+            color = "#D97757"  # Claude accent (approaching reset)
+
+        sec = ctk.CTkFrame(parent, fg_color="transparent")
+        sec.pack(fill="x", padx=20, pady=(3, 2))
+        row = ctk.CTkFrame(sec, fg_color="transparent")
+        row.pack(fill="x")
+        ctk.CTkLabel(row, text="Time elapsed", font=("Segoe UI", 12),
+                     text_color=self.CL_SECOND).pack(side="left")
+        ctk.CTkLabel(row, text=f"{pct}%", font=("Segoe UI Semibold", 13),
+                     text_color=color).pack(side="right")
+        track = ctk.CTkFrame(sec, fg_color=self.CL_TRACK, height=8, corner_radius=4)
+        track.pack(fill="x", pady=(4, 3))
+        track.pack_propagate(False)
+        ctk.CTkFrame(track, fg_color=color, corner_radius=4, height=8).place(
+            relx=0, rely=0, relwidth=max(pct / 100, 0.015), relheight=1)
+        ctk.CTkLabel(sec, text=f"Resets {reset_str}", font=("Segoe UI", 11),
+                     text_color=self.CL_TERTIARY, anchor="w").pack(fill="x")
 
     # ═══════════════════════════════════════
     # OPENAI PANEL — mirrors Claude layout
@@ -1666,6 +1780,13 @@ class CodexBarPopup(ctk.CTkToplevel):
             self._oa_usage_bar(parent, "Session (5h)", sp, d["session_reset"])
             self._oa_usage_bar(parent, "Weekly", wp, d["weekly_reset"])
 
+            # Weekly time progress (from local session data, no tokens)
+            epoch = d.get("weekly_resets_at_epoch", 0)
+            if epoch:
+                cx_pct, cx_reset = codex_week_time_pct_from_epoch(epoch)
+                if cx_pct >= 0:
+                    self._oa_time_progress_bar(parent, cx_pct, cx_reset)
+
         if has_cost:
             ctk.CTkFrame(parent, fg_color=self.OA_DIVIDER,
                          height=1, corner_radius=0).pack(fill="x", padx=20, pady=(8, 0))
@@ -1702,6 +1823,13 @@ class CodexBarPopup(ctk.CTkToplevel):
                 ctk.CTkLabel(nd, text="Run a session in Codex CLI",
                              font=("Segoe UI", 11),
                              text_color=self.OA_TERTIARY).pack(pady=(4, 0))
+
+            # Show time progress even without usage data if we have a reset epoch
+            epoch = d.get("weekly_resets_at_epoch", 0)
+            if epoch:
+                cx_pct, cx_reset = codex_week_time_pct_from_epoch(epoch)
+                if cx_pct >= 0:
+                    self._oa_time_progress_bar(parent, cx_pct, cx_reset)
 
         ctk.CTkFrame(parent, fg_color="transparent", height=6).pack(fill="x")
 
