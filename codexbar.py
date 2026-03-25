@@ -1289,8 +1289,11 @@ class CodexBarPopup(ctk.CTkToplevel):
 
         self.after(30, self._apply_dwm)
         self.bind("<Escape>", lambda e: self._close())
-        self.bind("<FocusOut>", self._on_focus_out)
-        self.focus_force()
+        # FocusOut auto-close is flaky on Windows tray apps and can hide the popup instantly
+        # self.bind("<FocusOut>", self._on_focus_out)
+        self.deiconify()
+        self.lift()
+        self.after(80, self.focus_force)
         self.after(40, self._animate_in, 0)
 
     # ── DWM ──
@@ -1323,6 +1326,12 @@ class CodexBarPopup(ctk.CTkToplevel):
 
     def _animate_in(self, step, total=14):
         if step > total:
+            try:
+                self.attributes("-alpha", self.FINAL_ALPHA)
+                self.geometry(f"+{self._target_x}+{self._target_y}")
+                self.lift()
+            except Exception:
+                pass
             return
         t = step / total
         ease = 1.0 - (1.0 - t) ** 3
@@ -1852,6 +1861,35 @@ class CodexBarPopup(ctk.CTkToplevel):
             ctk.CTkLabel(sec, text=f"Resets {reset}", font=("Segoe UI", 11),
                          text_color=self.OA_TERTIARY, anchor="w").pack(fill="x")
 
+    def _oa_time_progress_bar(self, parent, pct, reset_str):
+        """Render Codex weekly time-progress bar (dark theme, data-driven)."""
+        ctk.CTkFrame(parent, fg_color=self.OA_DIVIDER,
+                     height=1, corner_radius=0).pack(fill="x", padx=20, pady=(10, 0))
+        ctk.CTkLabel(parent, text="Week Progress", font=("Segoe UI Semibold", 13),
+                     text_color=self.OA_TERTIARY, anchor="w").pack(fill="x", padx=22, pady=(8, 2))
+        if pct < 50:
+            color = "#4A9D8E"
+        elif pct < 80:
+            color = "#10A37F"
+        else:
+            color = "#E8A838"
+        sec = ctk.CTkFrame(parent, fg_color="transparent")
+        sec.pack(fill="x", padx=20, pady=(3, 2))
+        row = ctk.CTkFrame(sec, fg_color="transparent")
+        row.pack(fill="x")
+        ctk.CTkLabel(row, text="Time elapsed", font=("Segoe UI", 12),
+                     text_color=self.OA_SECOND).pack(side="left")
+        ctk.CTkLabel(row, text=f"{pct}%", font=("Segoe UI Semibold", 13),
+                     text_color=color).pack(side="right")
+        track = ctk.CTkFrame(sec, fg_color=self.OA_TRACK, height=8, corner_radius=4)
+        track.pack(fill="x", pady=(4, 3))
+        track.pack_propagate(False)
+        ctk.CTkFrame(track, fg_color=color, corner_radius=4, height=8).place(
+            relx=0, rely=0, relwidth=max(pct / 100, 0.015), relheight=1)
+        if reset_str:
+            ctk.CTkLabel(sec, text=f"Resets {reset_str}", font=("Segoe UI", 11),
+                         text_color=self.OA_TERTIARY, anchor="w").pack(fill="x")
+
     # ═══════════════════════════════════════
     # FOOTER (shared between tabs)
     # ═══════════════════════════════════════
@@ -1986,7 +2024,10 @@ class CodexBarApp:
     def _show_popup(self):
         if self.popup is not None:
             try:
-                self.popup.destroy()
+                if self.popup.winfo_exists():
+                    self.popup.destroy()
+                    self.popup = None
+                    return
             except Exception:
                 pass
             self.popup = None
