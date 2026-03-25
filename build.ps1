@@ -20,7 +20,7 @@ print('    Icon generated: 16/32/48/64/128/256px')
 
 # Build
 Write-Host "[*] Running PyInstaller..." -ForegroundColor Cyan
-pyinstaller --onefile `
+python -m PyInstaller --onefile `
     --noconsole `
     --name "CodexBar" `
     --icon "assets/codexbar.ico" `

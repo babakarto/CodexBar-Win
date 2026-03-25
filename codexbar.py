@@ -340,7 +340,7 @@ class ClaudeDataFetcher:
         return {
             "provider": "Claude", "plan": "Unknown", "updated": "Never",
             "session_used_pct": 0, "session_reset": "unknown",
-            "weekly_used_pct": 0, "weekly_reset": "unknown",
+            "weekly_used_pct": 0, "weekly_reset": "unknown", "weekly_resets_at_epoch": 0,
             "opus_used_pct": 0,
             "cost_today": 0.0, "cost_today_tokens": "0",
             "cost_30d": 0.0, "cost_30d_tokens": "0",
@@ -363,7 +363,7 @@ class ClaudeDataFetcher:
         print("[CodexBar] Fetching real usage data...")
         got_usage = False
 
-        # 1) Try CLI
+        # 1) Try CLI first (fast), but keep going: API is usually more reliable.
         cli = self._fetch_cli()
         if cli and cli.get("source") == "cli":
             self.data = cli
@@ -373,16 +373,16 @@ class ClaudeDataFetcher:
             print("  -- CLI: not available")
 
         # 2) Try OAuth token from ~/.claude/.credentials.json
-        if not got_usage:
-            api = self._fetch_oauth_api()
-            if api and api.get("source") == "api":
-                self.data = api
-                got_usage = True
-                print(f"  OK OAuth: session {api['session_used_pct']}%, weekly {api['weekly_used_pct']}%")
-            else:
-                print("  -- OAuth: not available")
+        api = self._fetch_oauth_api()
+        if api and api.get("source") == "api":
+            # Prefer API values over CLI when available.
+            self.data = api
+            got_usage = True
+            print(f"  OK OAuth: session {api['session_used_pct']}%, weekly {api['weekly_used_pct']}%")
+        else:
+            print("  -- OAuth: not available")
 
-        # 3) Try browser cookie → Claude API
+        # 3) Try browser cookie → Claude API only if we still have no usage data
         if not got_usage:
             api = self._fetch_cookie_api()
             if api and api.get("source") == "api":
@@ -513,57 +513,43 @@ class ClaudeDataFetcher:
         d = self._empty()
         d["source"] = "cli"
 
-        # After ANSI stripping the Windows PTY often puts all fields on
-        # one line.  Insert newlines before known section headers and
-        # before "Resets" / "%used" so the line-by-line parser works.
-        clean = re.sub(r'(Current\s+session)', r'\n\1', clean, flags=re.I)
-        clean = re.sub(r'(Current\s+week)', r'\n\1', clean, flags=re.I)
-        clean = re.sub(r'(\d+\s*%\s*used)', r'\n\1', clean, flags=re.I)
-        clean = re.sub(r'([Rr]es(?:et)?s?\s+\w)', r'\n\1', clean)
+        # Windows PTY output sometimes collapses all usage fields into one line,
+        # so parse by section blocks instead of relying on line order/state.
+        compact = re.sub(r'\s+', ' ', clean).strip()
 
-        lines = clean.split("\n")
+        def parse_block(text):
+            pct = None
+            reset = None
 
-        section = None        # "session" | "weekly" | "sonnet"
-        for line in lines:
-            lo = line.lower().strip()
-
-            # ── section headers ──
-            # Don't 'continue' — the header and data can land on the
-            # same line after ANSI stripping in the Windows PTY.
-            if "current session" in lo:
-                section = "session"
-            elif "current week" in lo and "sonnet" not in lo:
-                section = "weekly"
-            elif "sonnet" in lo and "week" in lo:
-                section = "sonnet"
-
-            if not section:
-                continue
-
-            # ── percentage: "6%used" / "6% used" ──
-            m = re.search(r'(\d+)\s*%\s*used', line, re.I)
+            m = re.search(r'(\d+)\s*%\s*used', text, re.I)
             if m:
                 pct = int(m.group(1))
-                if section == "session":
-                    d["session_used_pct"] = pct
-                elif section == "weekly":
-                    d["weekly_used_pct"] = pct
 
-            # ── reset: tolerant pattern for "Resets"/"Reses"/"Reset" ──
-            # ANSI stripping can eat characters, so match broadly:
-            #   "Resets 4pm …", "Reses4pm …", "Reset Mar 27 …"
-            rm = re.search(
-                r'[Rr]es[et]*s?\s*(.+)', line)
+            rm = re.search(r'[Rr]es[et]*s?\s*(.+)', text)
             if rm:
                 val = rm.group(1).strip()
-                # drop trailing noise ("Esc to cancel", timezone in parens)
-                val = re.sub(r'\s*Esc.*$', '', val).rstrip(". ")
+                val = re.sub(r'\s*Esc.*$', '', val).rstrip('. ')
                 val = re.sub(r'\s*\([^)]*\)\s*$', '', val).strip()
                 if val and len(val) > 2:
-                    if section == "session":
-                        d["session_reset"] = val
-                    elif section == "weekly":
-                        d["weekly_reset"] = val
+                    reset = val
+
+            return pct, reset
+
+        sblk = re.search(r'Current\s*session(.*?)(?=Current\s*week|$)', compact, re.I)
+        if sblk:
+            spct, sreset = parse_block(sblk.group(1))
+            if spct is not None:
+                d["session_used_pct"] = spct
+            if sreset:
+                d["session_reset"] = sreset
+
+        wblk = re.search(r'Current\s*week(.*?)(?=Sonnet\s*week|Extra\s*usage|$)', compact, re.I)
+        if wblk:
+            wpct, wreset = parse_block(wblk.group(1))
+            if wpct is not None:
+                d["weekly_used_pct"] = wpct
+            if wreset:
+                d["weekly_reset"] = wreset
 
         # ── plan from welcome screen: "Claude Max" / "ClaudeMax" ──
         m = re.search(r'Claude\s*(Max|Pro|Team|Enterprise|Free)',
@@ -924,10 +910,11 @@ class CodexDataFetcher:
             "provider": "Codex", "plan": "Plus",
             "updated": "Never", "source": "none",
             "session_used_pct": 0, "session_reset": "unknown",
-            "weekly_used_pct": 0, "weekly_reset": "unknown",
+            "weekly_used_pct": 0, "weekly_reset": "unknown", "weekly_resets_at_epoch": 0,
             "cost_today": 0, "cost_today_tokens": "0",
             "cost_30d": 0, "cost_30d_tokens": "0",
             "model": "",
+            "signed_in": False,
             "error": None, "available": False,
         }
 
@@ -960,11 +947,15 @@ class CodexDataFetcher:
                 tokens = aj.get("tokens", {})
                 at = tokens.get("access_token", "")
                 if at:
+                    d["signed_in"] = True
+                    if d["source"] == "none":
+                        d["source"] = "auth"
                     # decode JWT payload (base64 middle segment)
                     parts = at.split(".")
                     if len(parts) >= 2:
-                        payload = parts[1] + "=" * (4 - len(parts[1]) % 4)
-                        claims = json.loads(base64.b64decode(payload))
+                        seg = parts[1]
+                        seg += "=" * ((4 - len(seg) % 4) % 4)
+                        claims = json.loads(base64.urlsafe_b64decode(seg))
                         plan = claims.get("https://api.openai.com/auth", {}).get(
                             "chatgpt_plan_type", "")
                         if plan:
@@ -1007,7 +998,7 @@ class CodexDataFetcher:
             # primary = 5h window
             primary = rl.get("primary", {})
             if primary:
-                d["session_used_pct"] = int(primary.get("used_percent", 0))
+                d["session_used_pct"] = self._to_pct(primary.get("used_percent", 0))
                 resets_at = primary.get("resets_at")
                 if resets_at:
                     d["session_reset"] = self._format_reset(resets_at)
@@ -1015,10 +1006,11 @@ class CodexDataFetcher:
             # secondary = weekly window
             secondary = rl.get("secondary", {})
             if secondary:
-                d["weekly_used_pct"] = int(secondary.get("used_percent", 0))
+                d["weekly_used_pct"] = self._to_pct(secondary.get("used_percent", 0))
                 resets_at = secondary.get("resets_at")
                 if resets_at:
                     d["weekly_reset"] = self._format_reset(resets_at)
+                    d["weekly_resets_at_epoch"] = float(resets_at)
 
             plan = rl.get("plan_type", "")
             if plan:
@@ -1036,19 +1028,25 @@ class CodexDataFetcher:
                 tokens = self._extract_total_tokens(jf)
                 if not tokens:
                     continue
-                inp = tokens.get("input_tokens", 0)
-                out = tokens.get("output_tokens", 0)
+                inp = int(tokens.get("input_tokens", 0) or 0)
+                out = int(tokens.get("output_tokens", 0) or 0)
                 total_in += inp
                 total_out += out
 
-                # check if file is from today
+                # check if file is from today (prefer filename, fallback mtime)
+                same_day = False
                 try:
                     ts_str = jf.stem.split("rollout-")[1][:10]  # "2026-03-22"
-                    if datetime.strptime(ts_str, "%Y-%m-%d").date() == today:
-                        today_in += inp
-                        today_out += out
+                    same_day = datetime.strptime(ts_str, "%Y-%m-%d").date() == today
                 except Exception:
-                    pass
+                    try:
+                        same_day = datetime.fromtimestamp(jf.stat().st_mtime).date() == today
+                    except Exception:
+                        same_day = False
+
+                if same_day:
+                    today_in += inp
+                    today_out += out
             except Exception:
                 continue
 
@@ -1067,56 +1065,72 @@ class CodexDataFetcher:
         d["cost_30d_tokens"] = fmt(total_in + total_out)
 
     @staticmethod
-    def _extract_rate_limits(jsonl_path):
-        """Return the last rate_limits dict from a JSONL file."""
-        last = None
+    def _iter_token_count_events(jsonl_path):
+        """Yield token_count-like payloads from different Codex JSONL schemas."""
         try:
             with open(jsonl_path, "r", encoding="utf-8", errors="ignore") as fh:
                 for line in fh:
                     line = line.strip()
-                    if not line or "rate_limits" not in line:
+                    if not line:
                         continue
                     try:
                         e = json.loads(line)
-                        p = e.get("payload", {})
-                        if isinstance(p, dict) and p.get("type") == "token_count":
-                            rl = p.get("rate_limits")
-                            if rl:
-                                last = rl
                     except Exception:
-                        pass
+                        continue
+
+                    candidates = []
+                    if isinstance(e, dict):
+                        candidates.append(e)
+                        p = e.get("payload")
+                        if isinstance(p, dict):
+                            candidates.append(p)
+
+                    for c in candidates:
+                        if not isinstance(c, dict):
+                            continue
+                        if c.get("type") == "token_count":
+                            yield c
+
         except Exception:
-            pass
+            return
+
+    @classmethod
+    def _extract_rate_limits(cls, jsonl_path):
+        """Return the last rate_limits dict from a JSONL file."""
+        last = None
+        for evt in cls._iter_token_count_events(jsonl_path):
+            rl = evt.get("rate_limits")
+            if isinstance(rl, dict):
+                last = rl
+        return last
+
+    @classmethod
+    def _extract_total_tokens(cls, jsonl_path):
+        """Return total_token_usage from the last token_count entry."""
+        last = None
+        for evt in cls._iter_token_count_events(jsonl_path):
+            info = evt.get("info") if isinstance(evt.get("info"), dict) else {}
+            t = info.get("total_token_usage")
+            if isinstance(t, dict):
+                last = t
         return last
 
     @staticmethod
-    def _extract_total_tokens(jsonl_path):
-        """Return total_token_usage from the last token_count entry."""
-        last = None
+    def _to_pct(value):
         try:
-            with open(jsonl_path, "r", encoding="utf-8", errors="ignore") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line or "total_token_usage" not in line:
-                        continue
-                    try:
-                        e = json.loads(line)
-                        p = e.get("payload", {})
-                        if isinstance(p, dict) and p.get("type") == "token_count":
-                            t = p.get("info", {}).get("total_token_usage")
-                            if t:
-                                last = t
-                    except Exception:
-                        pass
+            return max(0, min(100, int(float(value))))
         except Exception:
-            pass
-        return last
+            return 0
 
     @staticmethod
     def _format_reset(epoch):
         """Convert epoch timestamp to human-readable countdown."""
         try:
-            dt = datetime.fromtimestamp(epoch)
+            ts = float(epoch)
+            # handle milliseconds timestamps
+            if ts > 1e12:
+                ts /= 1000.0
+            dt = datetime.fromtimestamp(ts)
             delta = dt - datetime.now()
             secs = max(0, int(delta.total_seconds()))
             h, m = divmod(secs // 60, 60)
@@ -1125,6 +1139,75 @@ class CodexDataFetcher:
             return f"{h}h {m:02d}m"
         except Exception:
             return "unknown"
+
+
+# ─────────────────────────────────────────────
+# Weekly time progress (Friday 19:00 → Friday 18:59)
+# ─────────────────────────────────────────────
+
+def claude_week_time_pct() -> tuple:
+    """Calculate how much of the Claude weekly window has elapsed.
+
+    Cycle: Friday 19:00:00 → next Friday 18:59:59 (7 days).
+    Returns (pct: int 0-100, reset_str: str like "Fri 7:00 PM").
+    Zero-cost: uses only local clock, no API calls.
+    """
+    now = datetime.now()
+    weekday = now.weekday()  # 0=Mon ... 4=Fri
+    # Find the most recent Friday 19:00
+    days_since_friday = (weekday - 4) % 7
+    last_friday = now - timedelta(days=days_since_friday)
+    cycle_start = last_friday.replace(hour=19, minute=0, second=0, microsecond=0)
+    # If we haven't reached 19:00 on this Friday yet, go back one more week
+    if now < cycle_start:
+        cycle_start -= timedelta(days=7)
+    cycle_end = cycle_start + timedelta(days=7)
+    elapsed = (now - cycle_start).total_seconds()
+    total = 7 * 24 * 3600  # exactly 7 days
+    pct = min(max(int(elapsed / total * 100), 0), 100)
+    # Format reset time
+    reset_str = cycle_end.strftime("%a %b %d, %I:%M %p")
+    return pct, reset_str
+
+
+def codex_week_time_pct(weekly_reset_str: str) -> tuple:
+    """Calculate Codex weekly time progress from the resets_at data.
+
+    Codex uses a rolling 7-day window. We derive cycle_start = resets_at - 7 days.
+    Returns (pct: int 0-100, reset_display: str).
+    Zero-cost: uses only local data, no API calls.
+    """
+    if not weekly_reset_str or weekly_reset_str == "unknown":
+        return -1, ""
+    # weekly_reset is already formatted as countdown like "2d 5h" or "5h 30m"
+    # We need the raw resets_at epoch — so we return -1 to signal "use raw data"
+    return -1, weekly_reset_str
+
+
+def codex_week_time_pct_from_epoch(resets_at_epoch: float) -> tuple:
+    """Calculate Codex weekly time progress from raw epoch timestamp.
+
+    Cycle: (resets_at - 7 days) → resets_at.
+    Returns (pct: int 0-100, reset_str: str).
+    """
+    try:
+        ts = float(resets_at_epoch)
+        if ts > 1e12:
+            ts /= 1000.0
+        cycle_end = datetime.fromtimestamp(ts)
+        cycle_start = cycle_end - timedelta(days=7)
+        now = datetime.now()
+        if now >= cycle_end:
+            return 100, cycle_end.strftime("%a %b %d, %I:%M %p")
+        if now <= cycle_start:
+            return 0, cycle_end.strftime("%a %b %d, %I:%M %p")
+        elapsed = (now - cycle_start).total_seconds()
+        total = 7 * 24 * 3600
+        pct = min(max(int(elapsed / total * 100), 0), 100)
+        reset_str = cycle_end.strftime("%a %b %d, %I:%M %p")
+        return pct, reset_str
+    except Exception:
+        return -1, ""
 
 
 # ─────────────────────────────────────────────
@@ -1206,8 +1289,11 @@ class CodexBarPopup(ctk.CTkToplevel):
 
         self.after(30, self._apply_dwm)
         self.bind("<Escape>", lambda e: self._close())
-        self.bind("<FocusOut>", self._on_focus_out)
-        self.focus_force()
+        # FocusOut auto-close is flaky on Windows tray apps and can hide the popup instantly
+        # self.bind("<FocusOut>", self._on_focus_out)
+        self.deiconify()
+        self.lift()
+        self.after(80, self.focus_force)
         self.after(40, self._animate_in, 0)
 
     # ── DWM ──
@@ -1248,6 +1334,12 @@ class CodexBarPopup(ctk.CTkToplevel):
 
     def _animate_in(self, step, total=14):
         if step > total:
+            try:
+                self.attributes("-alpha", self.FINAL_ALPHA)
+                self.geometry(f"+{self._target_x}+{self._target_y}")
+                self.lift()
+            except Exception:
+                pass
             return
         t = step / total
         ease = 1.0 - (1.0 - t) ** 3
@@ -1515,6 +1607,10 @@ class CodexBarPopup(ctk.CTkToplevel):
             if op > 0:
                 self._cl_usage_bar(parent, "Opus", op)
 
+            # Weekly time progress (local clock, no tokens)
+            wt_pct, wt_reset = claude_week_time_pct()
+            self._cl_time_progress_bar(parent, wt_pct, wt_reset)
+
         if has_cost:
             ctk.CTkFrame(parent, fg_color=self.CL_DIVIDER,
                          height=1, corner_radius=0).pack(fill="x", padx=20, pady=(8, 0))
@@ -1567,6 +1663,13 @@ class CodexBarPopup(ctk.CTkToplevel):
                          font=("Segoe UI", 11),
                          text_color=self.CL_TERTIARY).pack(pady=(4, 0))
 
+        # Always show weekly time progress (works without API data)
+        if not has_data:
+            ctk.CTkFrame(parent, fg_color=self.CL_DIVIDER,
+                         height=1, corner_radius=0).pack(fill="x", padx=20, pady=(12, 0))
+            wt_pct, wt_reset = claude_week_time_pct()
+            self._cl_time_progress_bar(parent, wt_pct, wt_reset)
+
         ctk.CTkFrame(parent, fg_color="transparent", height=6).pack(fill="x")
 
     def _cl_usage_bar(self, parent, label, pct, reset=None):
@@ -1587,6 +1690,39 @@ class CodexBarPopup(ctk.CTkToplevel):
         if reset and reset != "unknown":
             ctk.CTkLabel(sec, text=f"Resets {reset}", font=("Segoe UI", 11),
                          text_color=self.CL_TERTIARY, anchor="w").pack(fill="x")
+
+    def _cl_time_progress_bar(self, parent, pct, reset_str):
+        """Render the weekly time-progress bar (clock-based, no tokens)."""
+        # Subtle divider before
+        ctk.CTkFrame(parent, fg_color=self.CL_DIVIDER,
+                     height=1, corner_radius=0).pack(fill="x", padx=20, pady=(10, 0))
+        ctk.CTkLabel(parent, text="Week Progress", font=("Segoe UI Semibold", 13),
+                     text_color=self.CL_TERTIARY,
+                     anchor="w").pack(fill="x", padx=22, pady=(8, 2))
+
+        # Color: use a calm blue gradient instead of usage colors
+        if pct < 50:
+            color = "#5B9BD5"  # calm blue
+        elif pct < 80:
+            color = "#4A8BC2"  # medium blue
+        else:
+            color = "#D97757"  # Claude accent (approaching reset)
+
+        sec = ctk.CTkFrame(parent, fg_color="transparent")
+        sec.pack(fill="x", padx=20, pady=(3, 2))
+        row = ctk.CTkFrame(sec, fg_color="transparent")
+        row.pack(fill="x")
+        ctk.CTkLabel(row, text="Time elapsed", font=("Segoe UI", 12),
+                     text_color=self.CL_SECOND).pack(side="left")
+        ctk.CTkLabel(row, text=f"{pct}%", font=("Segoe UI Semibold", 13),
+                     text_color=color).pack(side="right")
+        track = ctk.CTkFrame(sec, fg_color=self.CL_TRACK, height=8, corner_radius=4)
+        track.pack(fill="x", pady=(4, 3))
+        track.pack_propagate(False)
+        ctk.CTkFrame(track, fg_color=color, corner_radius=4, height=8).place(
+            relx=0, rely=0, relwidth=max(pct / 100, 0.015), relheight=1)
+        ctk.CTkLabel(sec, text=f"Resets {reset_str}", font=("Segoe UI", 11),
+                     text_color=self.CL_TERTIARY, anchor="w").pack(fill="x")
 
     # ═══════════════════════════════════════
     # OPENAI PANEL — mirrors Claude layout
@@ -1667,6 +1803,13 @@ class CodexBarPopup(ctk.CTkToplevel):
             self._oa_usage_bar(parent, "Session (5h)", sp, d["session_reset"])
             self._oa_usage_bar(parent, "Weekly", wp, d["weekly_reset"])
 
+            # Weekly time progress (from local session data, no tokens)
+            epoch = d.get("weekly_resets_at_epoch", 0)
+            if epoch:
+                cx_pct, cx_reset = codex_week_time_pct_from_epoch(epoch)
+                if cx_pct >= 0:
+                    self._oa_time_progress_bar(parent, cx_pct, cx_reset)
+
         if has_cost:
             ctk.CTkFrame(parent, fg_color=self.OA_DIVIDER,
                          height=1, corner_radius=0).pack(fill="x", padx=20, pady=(8, 0))
@@ -1696,11 +1839,25 @@ class CodexBarPopup(ctk.CTkToplevel):
                          height=1, corner_radius=0).pack(fill="x", padx=20, pady=(12, 0))
             nd = ctk.CTkFrame(parent, fg_color="transparent")
             nd.pack(fill="x", padx=20, pady=24)
-            ctk.CTkLabel(nd, text="No session data yet", font=("Segoe UI", 13),
-                         text_color=self.OA_SECOND).pack()
-            ctk.CTkLabel(nd, text="Run a session in Codex CLI",
-                         font=("Segoe UI", 11),
-                         text_color=self.OA_TERTIARY).pack(pady=(4, 0))
+            if d.get("signed_in"):
+                ctk.CTkLabel(nd, text="Codex signed in", font=("Segoe UI", 13),
+                             text_color=self.OA_SECOND).pack()
+                ctk.CTkLabel(nd, text="No usage metrics found yet in local Codex data",
+                             font=("Segoe UI", 11),
+                             text_color=self.OA_TERTIARY).pack(pady=(4, 0))
+            else:
+                ctk.CTkLabel(nd, text="No session data yet", font=("Segoe UI", 13),
+                             text_color=self.OA_SECOND).pack()
+                ctk.CTkLabel(nd, text="Run a session in Codex CLI",
+                             font=("Segoe UI", 11),
+                             text_color=self.OA_TERTIARY).pack(pady=(4, 0))
+
+            # Show time progress even without usage data if we have a reset epoch
+            epoch = d.get("weekly_resets_at_epoch", 0)
+            if epoch:
+                cx_pct, cx_reset = codex_week_time_pct_from_epoch(epoch)
+                if cx_pct >= 0:
+                    self._oa_time_progress_bar(parent, cx_pct, cx_reset)
 
         ctk.CTkFrame(parent, fg_color="transparent", height=6).pack(fill="x")
 
@@ -1721,6 +1878,35 @@ class CodexBarPopup(ctk.CTkToplevel):
             relx=0, rely=0, relwidth=max(pct / 100, 0.015), relheight=1)
         if reset and reset != "unknown":
             ctk.CTkLabel(sec, text=f"Resets {reset}", font=("Segoe UI", 11),
+                         text_color=self.OA_TERTIARY, anchor="w").pack(fill="x")
+
+    def _oa_time_progress_bar(self, parent, pct, reset_str):
+        """Render Codex weekly time-progress bar (dark theme, data-driven)."""
+        ctk.CTkFrame(parent, fg_color=self.OA_DIVIDER,
+                     height=1, corner_radius=0).pack(fill="x", padx=20, pady=(10, 0))
+        ctk.CTkLabel(parent, text="Week Progress", font=("Segoe UI Semibold", 13),
+                     text_color=self.OA_TERTIARY, anchor="w").pack(fill="x", padx=22, pady=(8, 2))
+        if pct < 50:
+            color = "#4A9D8E"
+        elif pct < 80:
+            color = "#10A37F"
+        else:
+            color = "#E8A838"
+        sec = ctk.CTkFrame(parent, fg_color="transparent")
+        sec.pack(fill="x", padx=20, pady=(3, 2))
+        row = ctk.CTkFrame(sec, fg_color="transparent")
+        row.pack(fill="x")
+        ctk.CTkLabel(row, text="Time elapsed", font=("Segoe UI", 12),
+                     text_color=self.OA_SECOND).pack(side="left")
+        ctk.CTkLabel(row, text=f"{pct}%", font=("Segoe UI Semibold", 13),
+                     text_color=color).pack(side="right")
+        track = ctk.CTkFrame(sec, fg_color=self.OA_TRACK, height=8, corner_radius=4)
+        track.pack(fill="x", pady=(4, 3))
+        track.pack_propagate(False)
+        ctk.CTkFrame(track, fg_color=color, corner_radius=4, height=8).place(
+            relx=0, rely=0, relwidth=max(pct / 100, 0.015), relheight=1)
+        if reset_str:
+            ctk.CTkLabel(sec, text=f"Resets {reset_str}", font=("Segoe UI", 11),
                          text_color=self.OA_TERTIARY, anchor="w").pack(fill="x")
 
     # ═══════════════════════════════════════
@@ -1857,7 +2043,10 @@ class CodexBarApp:
     def _show_popup(self):
         if self.popup is not None:
             try:
-                self.popup.destroy()
+                if self.popup.winfo_exists():
+                    self.popup.destroy()
+                    self.popup = None
+                    return
             except Exception:
                 pass
             self.popup = None
