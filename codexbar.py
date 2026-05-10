@@ -427,14 +427,34 @@ class ClaudeDataFetcher:
     @staticmethod
     def _pty_usage(cmd, startup_wait=5, trust_wait=3, cmd_wait=8):
         """Open claude in a PTY, send /usage, collect output, send /exit."""
-        # Use home dir as cwd to avoid "Pty is closed" conflict when another
-        # Claude Code session is active in the current working directory.
-        neutral_cwd = str(Path.home())
-        # Use simple 'cmd.exe /c claude' to avoid quoting issues with paths.
+        # Spawn in a *fresh, empty* directory. Claude Code refuses to start
+        # a new session in any folder that already has a project context
+        # (file lock / sessions/ pid file in ~/.claude/projects/<hash>),
+        # which used to slam shut the PTY mid-startup ("Pty is closed").
+        # ~/.codexbar-pty-cwd is unique to us and never has projects in it.
+        import tempfile as _tf
+        neutral_cwd = Path.home() / ".codexbar-pty-cwd"
+        try:
+            neutral_cwd.mkdir(exist_ok=True)
+        except Exception:
+            neutral_cwd = Path(_tf.gettempdir())
+        cmd_quoted = f'"{cmd}"' if " " in cmd else cmd
+        # Strip PyInstaller-injected env vars (_MEIPASS, _PYI_*) so the
+        # spawned Node-based claude.exe doesn't inherit a sanitized
+        # interpreter path that aborts startup.
+        clean_env = {k: v for k, v in os.environ.items()
+                     if k not in ("_MEIPASS", "_MEIPASS2",
+                                  "_PYI_APPLICATION_HOME_DIR")
+                     and not k.startswith("_PYI_")}
+        if "PATH" in clean_env:
+            parts = [p for p in clean_env["PATH"].split(";")
+                     if "_MEI" not in p and "PyInstaller" not in p]
+            clean_env["PATH"] = ";".join(parts)
         proc = PtyProcess.spawn(
-            "cmd.exe /c claude",
+            f'cmd.exe /c {cmd_quoted}',
             dimensions=(40, 120),
-            cwd=neutral_cwd,
+            cwd=str(neutral_cwd),
+            env=clean_env,
         )
         chunks = []
         stop = threading.Event()
@@ -494,15 +514,16 @@ class ClaudeDataFetcher:
     def _parse_usage(self, raw):
         """Parse the /usage output from the interactive Claude CLI.
 
-        After ANSI stripping, the PTY output has this line structure
-        (one piece of data per line, section header on its own line):
-
-            L0: Current session
-            L1: ███                 6%used
-            L2: Reses4pm (Europe/Malta)        ← "Resets" mangled
-            L3: Current week (all models)
-            L4: ███▌                7%used
-            L5: Resets Mar 27, 9:59am (Europe/Malta)
+        Block-based parser that tolerates two output styles:
+          A) Claude Code <= 2.0 — words separated by real spaces, e.g.
+                 Current session
+                 ███                 6% used
+                 Resets 4pm (Europe/Malta)
+          B) Claude Code 2.1+    — PTY uses cursor-positioning so spaces
+             collapse on Windows after ANSI stripping, e.g.
+                 Currentsession
+                                       0%used
+                 Resets1:40am(Europe/Malta)
         """
         # strip VT100 / ANSI / OSC / control chars
         clean = re.sub(r'\x1b\[[0-9;?]*[A-Za-z]', '', raw)
@@ -513,63 +534,74 @@ class ClaudeDataFetcher:
         d = self._empty()
         d["source"] = "cli"
 
-        # After ANSI stripping the Windows PTY often puts all fields on
-        # one line.  Insert newlines before known section headers and
-        # before "Resets" / "%used" so the line-by-line parser works.
-        clean = re.sub(r'(Current\s+session)', r'\n\1', clean, flags=re.I)
-        clean = re.sub(r'(Current\s+week)', r'\n\1', clean, flags=re.I)
-        clean = re.sub(r'(\d+\s*%\s*used)', r'\n\1', clean, flags=re.I)
-        clean = re.sub(r'([Rr]es(?:et)?s?\s+\w)', r'\n\1', clean)
-
-        lines = clean.split("\n")
-
-        section = None        # "session" | "weekly" | "sonnet"
-        for line in lines:
-            lo = line.lower().strip()
-
-            # ── section headers ──
-            # Don't 'continue' — the header and data can land on the
-            # same line after ANSI stripping in the Windows PTY.
-            if "current session" in lo:
-                section = "session"
-            elif "current week" in lo and "sonnet" not in lo:
-                section = "weekly"
-            elif "sonnet" in lo and "week" in lo:
-                section = "sonnet"
-
-            if not section:
-                continue
-
-            # ── percentage: "6%used" / "6% used" ──
-            m = re.search(r'(\d+)\s*%\s*used', line, re.I)
-            if m:
-                pct = int(m.group(1))
-                if section == "session":
-                    d["session_used_pct"] = pct
-                elif section == "weekly":
-                    d["weekly_used_pct"] = pct
-
-            # ── reset: tolerant pattern for "Resets"/"Reses"/"Reset" ──
-            # ANSI stripping can eat characters, so match broadly:
-            #   "Resets 4pm …", "Reses4pm …", "Reset Mar 27 …"
+        def grab_section(header_re):
+            """Slice the clean text from `header_re` up to the next
+            section header (or end), returning (pct, reset) or (None, None)."""
+            stop = (r'Current\s*session|'
+                    r'Current\s*week|'
+                    r'What\'?s\s*contributing|'
+                    r'Esc\s*to\s*cancel')
+            m = re.search(
+                header_re + r'(?P<body>.*?)(?=' + stop + r'|\Z)',
+                clean, re.I | re.S)
+            if not m:
+                return None, None
+            chunk = m.group('body')
+            pct = None
+            pm = re.search(r'(\d{1,3})\s*%\s*used', chunk, re.I)
+            if pm:
+                pct = max(0, min(100, int(pm.group(1))))
+            reset = None
+            # match "Resets <value>" — value runs until newline / paren /
+            # "Esc" hint. \s* between Resets and value covers the no-space case.
             rm = re.search(
-                r'[Rr]es[et]*s?\s*(.+)', line)
+                r'[Rr]es[et]{1,3}s?\s*([^\n()]+?)(?:\s*\(|Esc|$)',
+                chunk)
             if rm:
-                val = rm.group(1).strip()
-                # drop trailing noise ("Esc to cancel", timezone in parens)
-                val = re.sub(r'\s*Esc.*$', '', val).rstrip(". ")
-                val = re.sub(r'\s*\([^)]*\)\s*$', '', val).strip()
-                if val and len(val) > 2:
-                    if section == "session":
-                        d["session_reset"] = val
-                    elif section == "weekly":
-                        d["weekly_reset"] = val
+                val = rm.group(1).strip().rstrip(',. ')
+                # add a space between digits and letters when collapsed
+                # ("May14,3am" -> "May 14, 3am") for nicer display
+                val = re.sub(r'(\d)([A-Za-z])', r'\1 \2', val)
+                val = re.sub(r'([A-Za-z])(\d)', r'\1 \2', val)
+                val = re.sub(r',(\S)', r', \1', val)
+                if len(val) >= 2:
+                    reset = val.strip()
+            return pct, reset
+
+        pct, reset = grab_section(r'Current\s*session\b')
+        if pct is not None:
+            d["session_used_pct"] = pct
+        if reset:
+            d["session_reset"] = reset
+
+        # weekly all-models — header may say "(all models)" with or without space
+        pct, reset = grab_section(
+            r'Current\s*week\s*\(\s*all\s*models?\s*\)')
+        if pct is None:
+            # fallback: any "Current week" that isn't a model-specific bucket
+            pct, reset = grab_section(
+                r'Current\s*week(?!\s*\(\s*(?:Opus|Sonnet|Sonet|Haiku))')
+        if pct is not None:
+            d["weekly_used_pct"] = pct
+        if reset:
+            d["weekly_reset"] = reset
+
+        # weekly opus — "Sonet" tolerated for ANSI-mangled "Sonnet"
+        pct, _ = grab_section(
+            r'Current\s*week\s*\(\s*(?:Opus|Sonnet|Sonet)[^)]*\)')
+        if pct is not None:
+            d["opus_used_pct"] = pct
 
         # ── plan from welcome screen: "Claude Max" / "ClaudeMax" ──
-        m = re.search(r'Claude\s*(Max|Pro|Team|Enterprise|Free)',
-                       clean, re.I)
+        # capture optional "5x" / "20x" tier suffix, e.g. "Claude Max 20x"
+        m = re.search(
+            r'Claude\s*(Max|Pro|Team|Enterprise|Free)\s*(\d+x)?',
+            clean, re.I)
         if m:
-            d["plan"] = m.group(1).title()
+            plan = m.group(1).title()
+            if m.group(2):
+                plan = f"{plan} {m.group(2).lower()}"
+            d["plan"] = plan
 
         return d
 
