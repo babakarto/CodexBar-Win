@@ -13,15 +13,28 @@ Windows port of [steipete/CodexBar](https://github.com/steipete/CodexBar) for ma
   <img src="docs/codex-v2.png" alt="CodexBar — Codex tab" width="370">
 </p>
 
-## Download
+## Security note (please read)
 
-### Standalone .exe (no Python needed)
+**Releases v1.0.0 – v1.1.2 shipped a PyInstaller `CodexBar.exe` that antivirus engines
+flag as a trojan/infostealer. Those binaries have been removed and are no longer
+available.** The detection was triggered by two things:
 
-1. Go to [**Releases**](https://github.com/babakarto/CodexBar-Win/releases/latest)
-2. Download `CodexBar.exe` or `CodexBar-Win.zip`
-3. Run `CodexBar.exe` — it appears in your system tray
+1. A fallback that read the `sessionKey` cookie from Chrome/Edge/Brave (copying the
+   cookie database and decrypting it with DPAPI + AES-GCM) to call the Claude.ai usage
+   API. That is the exact technique used by real infostealers, and AV heuristics cannot
+   tell the difference — even though the cookie was only ever sent to `api.claude.ai`.
+2. An unsigned, single-file PyInstaller executable, which is a common false-positive source
+   on its own.
 
-### Run from source
+Nothing was ever exfiltrated, but shipping browser-cookie-decryption code was the wrong
+design. As of this commit the app **never touches your browser**: it only uses the
+Claude Code CLI and the credentials file Claude Code already stores locally.
+No prebuilt executables are distributed anymore — run it from source so you can read
+exactly what it does.
+
+If you downloaded an old `CodexBar.exe`, delete it. There is nothing else to clean up.
+
+## Install (run from source)
 
 ```bash
 git clone https://github.com/babakarto/CodexBar-Win.git
@@ -36,7 +49,7 @@ Or double-click `CodexBar.bat` — it installs dependencies and launches.
 
 - **Windows 10 or 11**
 - **Claude Code CLI** installed and logged in (`claude` in PATH)
-- Python 3.10+ (only if running from source)
+- Python 3.10+
 
 ## Features
 
@@ -57,8 +70,7 @@ CodexBar tries multiple methods in order, using the first that succeeds:
 |----------|--------|-------------|
 | 1 | **CLI (PTY)** | Spawns interactive `claude` via pseudo-terminal, sends `/usage`, parses output |
 | 2 | **OAuth token** | Reads `~/.claude/.credentials.json`, calls Claude.ai API |
-| 3 | **Browser cookies** | Reads `sessionKey` from Chrome/Edge/Brave, decrypts with DPAPI + AES-GCM |
-| 4 | **JSONL logs** | Scans `~/.claude/projects/` for conversation logs (always runs for cost data) |
+| 3 | **JSONL logs** | Scans `~/.claude/projects/` for conversation logs (always runs for cost data) |
 
 ## macOS vs Windows
 
@@ -67,21 +79,12 @@ CodexBar tries multiple methods in order, using the first that succeeds:
 | **UI** | SwiftUI menu bar popup | customtkinter system tray popup |
 | **Language** | Swift | Python |
 | **Providers** | 16+ (Claude, Cursor, Copilot, Gemini...) | Claude Code + OpenAI Codex |
-| **Data source** | CLI PTY | CLI PTY → OAuth → Cookies → JSONL |
-| **Install** | `brew install --cask steipete/tap/codexbar` | Download .exe or `pip install` |
-| **Auto-update** | Sparkle framework | GitHub Releases |
-| **Cookie decrypt** | macOS Keychain | Windows DPAPI + AES-GCM via ctypes |
-| **Size** | ~5 MB (native) | ~30 MB (bundled Python runtime) |
+| **Data source** | CLI PTY | CLI PTY → OAuth → JSONL |
+| **Install** | `brew install --cask steipete/tap/codexbar` | Run from source (`pip install -r requirements.txt`) |
+| **Auto-update** | Sparkle framework | `git pull` |
+| **Browser access** | Keychain cookie read | None |
+| **Size** | ~5 MB (native) | ~80 KB of Python (plus deps) |
 | **License** | MIT | MIT |
-
-## Build Standalone .exe
-
-```powershell
-.\build.ps1
-# Output: dist/CodexBar.exe (~30 MB)
-```
-
-Requires PyInstaller (`pip install pyinstaller`). The script handles icon generation and all hidden imports.
 
 ## Troubleshooting
 
@@ -89,7 +92,6 @@ Requires PyInstaller (`pip install pyinstaller`). The script handles icon genera
 |---------|-----|
 | No usage data shown | Make sure `claude` is in PATH and you're logged in |
 | "winpty not found" | `pip install pywinpty` |
-| Antivirus flags .exe | PyInstaller executables are commonly false-positived. Add an exception or run from source |
 | Popup doesn't appear | Check the system tray overflow area (click ^ arrow near clock) |
 | CLI shows 0% | Another Claude Code session may be running — CodexBar spawns its own PTY |
 
