@@ -904,7 +904,7 @@ class CodexBarPopup(ctk.CTkToplevel):
 
     def __init__(self, master, claude_data, codex_data=None, *,
                  on_close=None, on_refresh=None, on_quit=None,
-                 on_tab_switch=None):
+                 on_tab_switch=None, initial_tab="claude"):
         super().__init__(master)
         self._claude = claude_data
         self._codex = codex_data or CodexDataFetcher._empty()
@@ -912,7 +912,10 @@ class CodexBarPopup(ctk.CTkToplevel):
         self._on_refresh = on_refresh
         self._on_quit = on_quit
         self._on_tab_switch = on_tab_switch
+        # The UI is always built in the Claude layout first; the requested
+        # initial tab is applied right after _build_ui() via _do_swap().
         self._active_tab = "claude"
+        self._initial_tab = "openai" if initial_tab == "openai" else "claude"
 
         self.overrideredirect(True)
         self.configure(fg_color=self.CL_BG)
@@ -931,6 +934,13 @@ class CodexBarPopup(ctk.CTkToplevel):
         self._oa_logo_big = ctk.CTkImage(oa_big, size=(28, 28)) if oa_big else None
 
         self._build_ui()
+
+        # Open directly on the Codex tab when requested (e.g. Claude Code
+        # is not installed but Codex is).  The window is still invisible
+        # here (alpha 0), so the swap does not need the fade animation.
+        if self._initial_tab != self._active_tab:
+            self._active_tab = self._initial_tab
+            self._do_swap()
 
         self.update_idletasks()
         work = self._work_area()
@@ -1535,6 +1545,22 @@ class CodexBarApp:
         self.popup = None
         self.running = True
         self.codex_data = None
+        # provider currently shown in the tray / last tab opened by the user
+        self.active_provider = "claude"
+
+    @staticmethod
+    def default_provider(claude_data, codex_data):
+        """Pick the provider to show at startup.
+
+        Claude stays the default, except when Claude Code is not installed
+        while Codex is: a Codex-only user should not be greeted by the
+        Claude icon and an "Install Claude Code" prompt (issue #10).
+        """
+        claude_installed = bool((claude_data or {}).get("installed", False))
+        codex_available = bool((codex_data or {}).get("available", False))
+        if not claude_installed and codex_available:
+            return "openai"
+        return "claude"
 
     def start(self):
         print("[CodexBar] Fetching your real usage data...\n")
@@ -1546,6 +1572,9 @@ class CodexBarApp:
         except Exception as e:
             print(f"[CodexBar] Codex fetch err: {e}")
             self.codex_data = CodexDataFetcher._empty()
+
+        self.active_provider = self.default_provider(self.fetcher.data, self.codex_data)
+        print(f"[CodexBar] Default tab: {'Codex' if self.active_provider == 'openai' else 'Claude'}")
 
         # ── hidden tkinter root ──
         ctk.set_appearance_mode("light")
@@ -1563,7 +1592,8 @@ class CodexBarApp:
             Menu.SEPARATOR,
             MenuItem('Quit', self._tray_quit),
         )
-        self.tray = pystray.Icon('CodexBar', make_icon(sl, wl), 'CodexBar', menu)
+        self.tray = pystray.Icon('CodexBar', make_icon(sl, wl, provider=self.active_provider),
+                                 'CodexBar', menu)
         threading.Thread(target=self.tray.run, daemon=True).start()
 
         # ── auto-refresh every 5 min ──
@@ -1608,13 +1638,15 @@ class CodexBarApp:
             on_refresh=lambda: self.root.after(0, self._do_refresh),
             on_quit=lambda: self.root.after(0, self._do_quit),
             on_tab_switch=self._on_tab_switch,
+            initial_tab=self.active_provider,
         )
 
     def _on_popup_closed(self):
         self.popup = None
 
     def _on_tab_switch(self, tab):
-        self._set_tray_icon(tab)
+        self.active_provider = "openai" if tab == "openai" else "claude"
+        self._set_tray_icon(self.active_provider)
 
     def _set_tray_icon(self, provider):
         try:
@@ -1633,9 +1665,12 @@ class CodexBarApp:
             except Exception:
                 pass
             d = self.fetcher.data
+            # keep the icon of the provider the user is currently on
+            # (a refresh used to silently flip it back to Claude)
             self.tray.icon = make_icon(
                 (100 - d["session_used_pct"]) / 100,
-                (100 - d["weekly_used_pct"]) / 100)
+                (100 - d["weekly_used_pct"]) / 100,
+                provider=self.active_provider)
             print("[CodexBar] Refreshed")
         threading.Thread(target=bg, daemon=True).start()
 

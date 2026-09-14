@@ -59,6 +59,7 @@ Or double-click `CodexBar.bat` — it installs dependencies and launches.
 - **Cost tracking** — today's spend and 30-day totals from local logs
 - **Native popup** — customtkinter window with rounded corners, slide-up animation
 - **Provider branding** — Claude orange palette + OpenAI dark/green theme, tray icon switches per tab
+- **Smart default tab** — opens on Codex (with the OpenAI tray icon) when Claude Code is not installed
 - **Auto-refresh** — updates every 5 minutes
 - **Zero config** — reads everything Claude Code already stores locally
 
